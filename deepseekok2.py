@@ -662,18 +662,18 @@ def calculate_dynamic_tp_sl(signal, current_price, market_state, position=None):
 
     atr_pct = market_state.get('atr_pct', 2.0)  # 波动率
 
-    # 极致优化止损止盈比例 - 针对BTC微小波动
+    # 优化止损止盈比例 - 保持下跌敏感，上涨放宽
     atr_pct = market_state.get('atr_pct', 2.0)
     
     if atr_pct > 2.5:  # 高波动
-        base_sl_pct = 0.008  # 0.8%止损
-        base_tp_pct = 0.012  # 1.2%止盈
+        base_sl_pct = 0.008  # 保持紧止损0.8%
+        base_tp_pct = 0.06   # 恢复原始6%止盈
     elif atr_pct < 1.0:  # 极低波动
-        base_sl_pct = 0.003  # 0.3%止损
-        base_tp_pct = 0.006  # 0.6%止盈
+        base_sl_pct = 0.003  # 极紧止损0.3%
+        base_tp_pct = 0.03   # 恢复原始3%止盈
     else:  # 正常波动
-        base_sl_pct = 0.005  # 0.5%止损
-        base_tp_pct = 0.009  # 0.9%止盈
+        base_sl_pct = 0.005  # 紧止损0.5%
+        base_tp_pct = 0.05   # 恢复原始5%止盈
 
     # 根据信号方向计算
     if signal == 'BUY':
