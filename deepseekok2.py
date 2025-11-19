@@ -53,16 +53,16 @@ TRADE_CONFIG = {
         'medium_term': 50,  # 中期均线（50小时，约2天）
         'long_term': 168  # 长期趋势（168小时，7天）
     },
-    # 优化智能仓位参数 - 提高小波动收益敏感度
+    # 极致优化仓位参数 - 微小波动也能产生收益
     'position_management': {
         'enable_intelligent_position': True,
-        'base_usdt_amount': 25,  # USDT投入下单基数，可以根据实际账户数量来提高基础投入
-        'high_confidence_multiplier': 3.0,  # 高信心时加大仓位
-        'medium_confidence_multiplier': 2.0,
-        'low_confidence_multiplier': 1.0,
-        'max_position_ratio': 0.8,  # 提高最大仓位比例
-        'trend_strength_multiplier': 1.5,
-        'micro_movement_multiplier': 2.0  # 新增：小波动放大器
+        'base_usdt_amount': 25,  # 大幅提高基础投入
+        'high_confidence_multiplier': 5.0,  # 高信心时5倍仓位
+        'medium_confidence_multiplier': 3.0,
+        'low_confidence_multiplier': 2.0,
+        'max_position_ratio': 0.9,  # 最大仓位90%
+        'trend_strength_multiplier': 2.0,
+        'micro_movement_multiplier': 3.0  # 小波动3倍放大
     }
 }
 
@@ -185,13 +185,13 @@ def calculate_intelligent_position(signal_data, price_data, current_position):
         return fixed_contracts
 
     try:
-        # 获取账户余额
+        # 获取账户余额 - 确保最小交易量
         balance = exchange.fetch_balance()
         usdt_balance = balance['USDT']['free']
-
-        # 基础USDT投入
-        base_usdt = config['base_usdt_amount']
-        print(f"💰 可用USDT余额: {usdt_balance:.2f}, 下单基数{base_usdt}")
+        
+        # 使用账户大部分余额，确保最小交易量
+        base_usdt = min(config['base_usdt_amount'], usdt_balance * 0.85)  # 使用85%余额
+        print(f"💰 可用USDT余额: {usdt_balance:.2f}, 实际下单基数{base_usdt}")
 
         # 根据信心程度调整 - 修复这里
         confidence_multiplier = {
@@ -207,21 +207,26 @@ def calculate_intelligent_position(signal_data, price_data, current_position):
         else:
             trend_multiplier = 1.0
 
-        # 根据RSI状态调整 - 更激进的超买超卖策略
+        # 极致优化RSI策略 - 超敏感模式
         rsi = price_data['technical_data'].get('rsi', 50)
         current_price = price_data['price']
         
-        # 计算价格变化敏感度
+        # 超敏感价格变化检测
         price_change = abs(price_data.get('price_change', 0))
-        if price_change < 0.1:  # 小波动时增加仓位
-            micro_multiplier = config.get('micro_movement_multiplier', 2.0)
+        if price_change < 0.05:  # 极微小波动
+            micro_multiplier = config.get('micro_movement_multiplier', 3.0)
+        elif price_change < 0.1:
+            micro_multiplier = 2.5
         else:
             micro_multiplier = 1.0
             
-        if rsi > 80 or rsi < 20:  # 极端超买超卖时反向加仓
+        # RSI超敏感阈值
+        if rsi > 85 or rsi < 15:  # 极值区域
+            rsi_multiplier = 1.5
+        elif rsi > 80 or rsi < 20:
             rsi_multiplier = 1.2
         elif rsi > 75 or rsi < 25:
-            rsi_multiplier = 0.8
+            rsi_multiplier = 0.9
         else:
             rsi_multiplier = 1.0
 
@@ -249,8 +254,8 @@ def calculate_intelligent_position(signal_data, price_data, current_position):
         # 精度处理：OKX BTC合约最小交易单位为0.01张
         contract_size = round(contract_size, 2)  # 保留2位小数
 
-        # 确保最小交易量
-        min_contracts = TRADE_CONFIG.get('min_amount', 0.01)
+        # 确保最小交易量 - 提高最小交易量
+        min_contracts = max(TRADE_CONFIG.get('min_amount', 0.01), 0.05)  # 最小0.05张
         if contract_size < min_contracts:
             contract_size = min_contracts
             print(f"⚠️ 仓位小于最小值，调整为: {contract_size} 张")
@@ -657,16 +662,18 @@ def calculate_dynamic_tp_sl(signal, current_price, market_state, position=None):
 
     atr_pct = market_state.get('atr_pct', 2.0)  # 波动率
 
-    # 优化止损止盈比例 - 适应BTC小波动特性
-    if market_state['state'].startswith('高波动'):
-        base_sl_pct = 0.015  # 降低止损到1.5%
-        base_tp_pct = 0.04   # 降低止盈到4%，提高达成概率
-    elif market_state['state'].startswith('低波动'):
-        base_sl_pct = 0.008  # 超低止损0.8%
-        base_tp_pct = 0.015  # 超低止盈1.5%，适应小波动
-    else:
-        base_sl_pct = 0.012  # 平衡止损1.2%
-        base_tp_pct = 0.025  # 平衡止盈2.5%
+    # 极致优化止损止盈比例 - 针对BTC微小波动
+    atr_pct = market_state.get('atr_pct', 2.0)
+    
+    if atr_pct > 2.5:  # 高波动
+        base_sl_pct = 0.008  # 0.8%止损
+        base_tp_pct = 0.012  # 1.2%止盈
+    elif atr_pct < 1.0:  # 极低波动
+        base_sl_pct = 0.003  # 0.3%止损
+        base_tp_pct = 0.006  # 0.6%止盈
+    else:  # 正常波动
+        base_sl_pct = 0.005  # 0.5%止损
+        base_tp_pct = 0.009  # 0.9%止盈
 
     # 根据信号方向计算
     if signal == 'BUY':
