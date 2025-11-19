@@ -45,7 +45,7 @@ exchange = ccxt.okx({
 TRADE_CONFIG = {
     'symbol': 'BTC/USDT:USDT',  # OKX的合约符号格式
     'leverage': 10,  # 杠杆倍数,只影响保证金不影响下单价值。提高杠杆倍数增强收益敏感度
-    'timeframe': os.getenv('TIMEFRAME', '5m'),  # 改为5分钟K线，提高交易频率
+    'timeframe': os.getenv('TIMEFRAME', '15m'),  # 改为15分钟K线，保持交易频率
     'test_mode': False,  # 测试模式
     'data_points': int(os.getenv('DATA_POINTS', '96')),  # 24小时数据（96根15分钟K线）
     'analysis_periods': {
