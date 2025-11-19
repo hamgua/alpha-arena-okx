@@ -662,18 +662,33 @@ def calculate_dynamic_tp_sl(signal, current_price, market_state, position=None):
 
     atr_pct = market_state.get('atr_pct', 2.0)  # 波动率
 
-    # 优化止损止盈比例 - 保持下跌敏感，上涨放宽
+    # 智能优化止盈止损 - 基于波动率和持仓状态
     atr_pct = market_state.get('atr_pct', 2.0)
     
+    # 基础设置（可根据持仓盈亏动态调整）
     if atr_pct > 2.5:  # 高波动
-        base_sl_pct = 0.008  # 保持紧止损0.8%
-        base_tp_pct = 0.06   # 恢复原始6%止盈
+        base_sl_pct = 0.008  # 紧止损
+        base_tp_pct = 0.08   # 提高止盈到8%，捕获大波动
     elif atr_pct < 1.0:  # 极低波动
-        base_sl_pct = 0.003  # 极紧止损0.3%
-        base_tp_pct = 0.03   # 恢复原始3%止盈
+        base_sl_pct = 0.003  # 超紧止损
+        base_tp_pct = 0.05   # 提高低波动止盈到5%
     else:  # 正常波动
-        base_sl_pct = 0.005  # 紧止损0.5%
-        base_tp_pct = 0.05   # 恢复原始5%止盈
+        base_sl_pct = 0.005  # 平衡止损
+        base_tp_pct = 0.065  # 平衡止盈6.5%
+    
+    # 持仓盈亏动态调整
+    if position and position.get('unrealized_pnl', 0) > 0:
+        profit_pct = position['unrealized_pnl'] / (position['entry_price'] * position['size'] * 0.01)
+        if profit_pct > 0.03:  # 盈利3%以上，放宽止盈
+            base_tp_pct *= 1.2  # 止盈放大20%
+        elif profit_pct > 0.05:  # 盈利5%以上，继续放宽
+            base_tp_pct *= 1.5  # 止盈放大50%
+    
+    # 趋势强度调整
+    if market_state['trend_strength'] == '强上涨':
+        base_tp_pct *= 1.3  # 强趋势放大止盈
+    elif market_state['trend_strength'] == '强下跌':
+        base_sl_pct *= 0.8  # 强下跌趋势收紧止损
 
     # 根据信号方向计算
     if signal == 'BUY':
