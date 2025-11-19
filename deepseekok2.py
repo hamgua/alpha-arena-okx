@@ -44,8 +44,8 @@ exchange = ccxt.okx({
 # 交易参数配置 - 结合两个版本的优点
 TRADE_CONFIG = {
     'symbol': 'BTC/USDT:USDT',  # OKX的合约符号格式
-    'leverage': 10,  # 杠杆倍数,只影响保证金不影响下单价值
-    'timeframe': os.getenv('TIMEFRAME', '15m'),  # 使用15分钟K线（可用环境变量覆盖）
+    'leverage': 10,  # 杠杆倍数,只影响保证金不影响下单价值。提高杠杆倍数增强收益敏感度
+    'timeframe': os.getenv('TIMEFRAME', '5m'),  # 改为5分钟K线，提高交易频率
     'test_mode': False,  # 测试模式
     'data_points': int(os.getenv('DATA_POINTS', '96')),  # 24小时数据（96根15分钟K线）
     'analysis_periods': {
@@ -53,15 +53,16 @@ TRADE_CONFIG = {
         'medium_term': 50,  # 中期均线（50小时，约2天）
         'long_term': 168  # 长期趋势（168小时，7天）
     },
-    # 新增智能仓位参数
+    # 优化智能仓位参数 - 提高小波动收益敏感度
     'position_management': {
-        'enable_intelligent_position': True,  # 🆕 新增：是否启用智能仓位管理
-        'base_usdt_amount': 25,  # USDT投入下单基数
-        'high_confidence_multiplier': 1.5,
-        'medium_confidence_multiplier': 1.0,
-        'low_confidence_multiplier': 0.5,
-        'max_position_ratio': 0.5,  # 单次最大仓位比例（0.5=50%）
-        'trend_strength_multiplier': 1.2
+        'enable_intelligent_position': True,
+        'base_usdt_amount': 25,  # USDT投入下单基数，可以根据实际账户数量来提高基础投入
+        'high_confidence_multiplier': 3.0,  # 高信心时加大仓位
+        'medium_confidence_multiplier': 2.0,
+        'low_confidence_multiplier': 1.0,
+        'max_position_ratio': 0.8,  # 提高最大仓位比例
+        'trend_strength_multiplier': 1.5,
+        'micro_movement_multiplier': 2.0  # 新增：小波动放大器
     }
 }
 
@@ -206,15 +207,26 @@ def calculate_intelligent_position(signal_data, price_data, current_position):
         else:
             trend_multiplier = 1.0
 
-        # 根据RSI状态调整（超买超卖区域减仓）
+        # 根据RSI状态调整 - 更激进的超买超卖策略
         rsi = price_data['technical_data'].get('rsi', 50)
-        if rsi > 75 or rsi < 25:
-            rsi_multiplier = 0.7
+        current_price = price_data['price']
+        
+        # 计算价格变化敏感度
+        price_change = abs(price_data.get('price_change', 0))
+        if price_change < 0.1:  # 小波动时增加仓位
+            micro_multiplier = config.get('micro_movement_multiplier', 2.0)
+        else:
+            micro_multiplier = 1.0
+            
+        if rsi > 80 or rsi < 20:  # 极端超买超卖时反向加仓
+            rsi_multiplier = 1.2
+        elif rsi > 75 or rsi < 25:
+            rsi_multiplier = 0.8
         else:
             rsi_multiplier = 1.0
 
-        # 计算建议投入USDT金额
-        suggested_usdt = base_usdt * confidence_multiplier * trend_multiplier * rsi_multiplier
+        # 计算建议投入USDT金额 - 加入小波动放大器
+        suggested_usdt = base_usdt * confidence_multiplier * trend_multiplier * rsi_multiplier * micro_multiplier
 
         # 风险管理：不超过总资金的指定比例 - 删除重复定义
         max_usdt = usdt_balance * config['max_position_ratio']
@@ -645,16 +657,16 @@ def calculate_dynamic_tp_sl(signal, current_price, market_state, position=None):
 
     atr_pct = market_state.get('atr_pct', 2.0)  # 波动率
 
-    # 基础止损止盈比例 - 根据市场波动率调整
+    # 优化止损止盈比例 - 适应BTC小波动特性
     if market_state['state'].startswith('高波动'):
-        base_sl_pct = 0.025  # 2.5%
-        base_tp_pct = 0.06   # 6%
+        base_sl_pct = 0.015  # 降低止损到1.5%
+        base_tp_pct = 0.04   # 降低止盈到4%，提高达成概率
     elif market_state['state'].startswith('低波动'):
-        base_sl_pct = 0.015  # 1.5%
-        base_tp_pct = 0.03   # 3%
+        base_sl_pct = 0.008  # 超低止损0.8%
+        base_tp_pct = 0.015  # 超低止盈1.5%，适应小波动
     else:
-        base_sl_pct = 0.02   # 2%
-        base_tp_pct = 0.05   # 5%
+        base_sl_pct = 0.012  # 平衡止损1.2%
+        base_tp_pct = 0.025  # 平衡止盈2.5%
 
     # 根据信号方向计算
     if signal == 'BUY':
