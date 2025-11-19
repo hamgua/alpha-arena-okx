@@ -1793,11 +1793,19 @@ def main():
     # 初始化Web界面数据文件
     print("🌐 初始化Web界面数据...")
     try:
+        # 确保数据文件存在
+        from data_manager import load_trades_history, load_equity_history, save_equity_snapshot
+        
+        # 预加载确保文件创建
+        load_trades_history()
+        load_equity_history()
+        
         # 获取初始账户信息
         balance = exchange.fetch_balance()
+        current_equity = float(balance['USDT'].get('total', 0))
         initial_account = {
             'balance': float(balance['USDT'].get('free', 0)),
-            'equity': float(balance['USDT'].get('total', 0)),
+            'equity': current_equity,
             'leverage': TRADE_CONFIG['leverage']
         }
         
@@ -1821,6 +1829,9 @@ def main():
                 'unrealized_pnl': current_pos['unrealized_pnl']
             }
         
+        # 初始化权益快照
+        save_equity_snapshot(current_equity)
+        
         # 初始化系统状态
         update_system_status(
             status='running',
@@ -1838,6 +1849,12 @@ def main():
         print("✅ Web界面数据初始化完成")
     except Exception as e:
         print(f"⚠️ Web界面数据初始化失败: {e}")
+        # 创建空文件确保后续正常运行
+        try:
+            from data_manager import save_equity_snapshot
+            save_equity_snapshot(100.0)  # 默认初始权益
+        except:
+            pass
         print("继续运行，将在首次交易时创建数据")
 
     tf = TRADE_CONFIG.get('timeframe', '15m')

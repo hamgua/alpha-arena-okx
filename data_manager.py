@@ -36,7 +36,9 @@ def save_trade_record(trade: Dict):
         trades = []
         if os.path.exists(TRADES_FILE):
             with open(TRADES_FILE, 'r', encoding='utf-8') as f:
-                trades = json.load(f)
+                content = f.read().strip()
+                if content:
+                    trades = json.loads(content)
         
         # 添加新记录
         trades.append(trade)
@@ -50,13 +52,31 @@ def save_trade_record(trade: Dict):
             json.dump(trades, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"保存交易记录失败: {e}")
+        # 确保文件存在且格式正确
+        try:
+            with open(TRADES_FILE, 'w', encoding='utf-8') as f:
+                json.dump([trade], f, ensure_ascii=False, indent=2)
+        except:
+            pass
 
 def load_trades_history() -> List[Dict]:
     """加载交易历史"""
     try:
         if os.path.exists(TRADES_FILE):
             with open(TRADES_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                content = f.read().strip()
+                if not content:  # 文件为空
+                    return []
+                return json.loads(content)
+        else:
+            # 文件不存在，创建空文件
+            with open(TRADES_FILE, 'w', encoding='utf-8') as f:
+                json.dump([], f)
+            return []
+    except json.JSONDecodeError:
+        # JSON格式错误，重置为空数组
+        with open(TRADES_FILE, 'w', encoding='utf-8') as f:
+            json.dump([], f)
         return []
     except Exception as e:
         print(f"加载交易历史失败: {e}")
@@ -97,7 +117,9 @@ def save_equity_snapshot(equity: float, timestamp: str = None):
         equity_history = []
         if os.path.exists(EQUITY_HISTORY_FILE):
             with open(EQUITY_HISTORY_FILE, 'r', encoding='utf-8') as f:
-                equity_history = json.load(f)
+                content = f.read().strip()
+                if content:
+                    equity_history = json.loads(content)
 
         # 添加新快照
         equity_history.append({
@@ -115,13 +137,31 @@ def save_equity_snapshot(equity: float, timestamp: str = None):
 
     except Exception as e:
         print(f"保存权益快照失败: {e}")
+        # 确保文件存在且格式正确
+        try:
+            with open(EQUITY_HISTORY_FILE, 'w', encoding='utf-8') as f:
+                json.dump([{'timestamp': timestamp, 'equity': equity}], f, ensure_ascii=False, indent=2)
+        except:
+            pass
 
 def load_equity_history() -> List[Dict]:
     """加载账户权益历史"""
     try:
         if os.path.exists(EQUITY_HISTORY_FILE):
             with open(EQUITY_HISTORY_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                content = f.read().strip()
+                if not content:  # 文件为空
+                    return []
+                return json.loads(content)
+        else:
+            # 文件不存在，创建空文件
+            with open(EQUITY_HISTORY_FILE, 'w', encoding='utf-8') as f:
+                json.dump([], f)
+            return []
+    except json.JSONDecodeError:
+        # JSON格式错误，重置为空数组
+        with open(EQUITY_HISTORY_FILE, 'w', encoding='utf-8') as f:
+            json.dump([], f)
         return []
     except Exception as e:
         print(f"加载权益历史失败: {e}")
