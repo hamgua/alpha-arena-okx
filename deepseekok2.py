@@ -13,11 +13,23 @@ from data_manager import update_system_status, save_trade_record
 
 load_dotenv()
 
-# 初始化DeepSeek客户端
-deepseek_client = OpenAI(
-    api_key=os.getenv('DEEPSEEK_API_KEY'),
-    base_url="https://api.deepseek.com"
-)
+# AI提供商配置（DeepSeek 或 Qwen3-Max）
+AI_PROVIDER = os.getenv('AI_PROVIDER', 'deepseek').lower()
+ai_client = None
+AI_MODEL = None
+
+if AI_PROVIDER == 'qwen':
+    ai_client = OpenAI(
+        api_key=os.getenv('QWEN_API_KEY'),
+        base_url=os.getenv('QWEN_BASE_URL', 'https://dashscope.aliyuncs.com/compatible/v1')
+    )
+    AI_MODEL = os.getenv('QWEN_MODEL', 'qwen3-max')
+else:
+    ai_client = OpenAI(
+        api_key=os.getenv('DEEPSEEK_API_KEY'),
+        base_url=os.getenv('DEEPSEEK_BASE_URL', 'https://api.deepseek.com')
+    )
+    AI_MODEL = os.getenv('DEEPSEEK_MODEL', 'deepseek-chat')
 
 # 初始化OKX交易所
 exchange = ccxt.okx({
@@ -33,9 +45,9 @@ exchange = ccxt.okx({
 TRADE_CONFIG = {
     'symbol': 'BTC/USDT:USDT',  # OKX的合约符号格式
     'leverage': 10,  # 杠杆倍数,只影响保证金不影响下单价值
-    'timeframe': '1h',  # 使用1小时K线
+    'timeframe': os.getenv('TIMEFRAME', '15m'),  # 使用15分钟K线（可用环境变量覆盖）
     'test_mode': False,  # 测试模式
-    'data_points': 168,  # 7天数据（168根1小时K线）
+    'data_points': int(os.getenv('DATA_POINTS', '96')),  # 24小时数据（96根15分钟K线）
     'analysis_periods': {
         'short_term': 20,  # 短期均线（20小时）
         'medium_term': 50,  # 中期均线（50小时，约2天）
@@ -44,11 +56,11 @@ TRADE_CONFIG = {
     # 新增智能仓位参数
     'position_management': {
         'enable_intelligent_position': True,  # 🆕 新增：是否启用智能仓位管理
-        'base_usdt_amount': 100,  # USDT投入下单基数
+        'base_usdt_amount': 25,  # USDT投入下单基数
         'high_confidence_multiplier': 1.5,
         'medium_confidence_multiplier': 1.0,
         'low_confidence_multiplier': 0.5,
-        'max_position_ratio': 50,  # 单次最大仓位比例
+        'max_position_ratio': 0.5,  # 单次最大仓位比例（0.5=50%）
         'trend_strength_multiplier': 1.2
     }
 }
@@ -320,7 +332,10 @@ def get_sentiment_indicators():
     """获取情绪指标 - 简洁版本"""
     try:
         API_URL = "https://service.cryptoracle.network/openapi/v2/endpoint"
-        API_KEY = "7ad48a56-8730-4238-a714-eebc30834e3e"
+        API_KEY = os.getenv('CRYPTO_ORACLE_API_KEY')
+
+        if not API_KEY:
+            return None
 
         # 获取最近4小时数据
         end_time = datetime.now()
@@ -836,8 +851,8 @@ RSI: {price_data['technical_data'].get('rsi', 0):.1f} | MACD: {price_data['trend
 """
 
     try:
-        response = deepseek_client.chat.completions.create(
-            model="deepseek-chat",
+        response = ai_client.chat.completions.create(
+            model=AI_MODEL,
             messages=[
                 {"role": "system",
                  "content": f"您是专业交易员，专注{TRADE_CONFIG['timeframe']}周期趋势分析。严格输出JSON格式，不要添加任何解释文字。"},
@@ -978,47 +993,55 @@ def get_active_tp_sl_orders():
 
 
 def cancel_existing_tp_sl_orders():
-    """取消现有的止盈止损订单"""
+    """取消现有的止盈止损算法订单"""
     global active_tp_sl_orders
 
     try:
-        # 转换交易对格式：BTC/USDT:USDT -> BTC-USDT-SWAP
+        # 转换交易对格式：例如 "BTC/USDT:USDT" -> "BTC-USDT-SWAP"
         inst_id = TRADE_CONFIG['symbol'].replace('/USDT:USDT', '-USDT-SWAP').replace('/', '-')
 
-        # 使用OKX专用的算法订单API
-        # 获取所有活跃的算法订单（止盈止损订单）
-        try:
-            # OKX的算法订单查询
-            response = exchange.private_get_trade_orders_algo_pending({
-                'instType': 'SWAP',
-                'instId': inst_id,
-                'ordType': 'conditional'  # 查询条件单
-            })
+        # 查询活跃算法订单（止盈止损）
+        response = exchange.private_get_trade_orders_algo_pending({
+            'instType': 'SWAP',
+            'instId': inst_id,
+            'ordType': 'conditional'
+        })
 
-            if response.get('code') == '0' and response.get('data'):
-                for order in response['data']:
-                    # 检查是否是止盈止损订单
-                    ord_type = order.get('ordType')
-                    if ord_type in ['conditional', 'oco']:
-                        try:
-                            # 取消算法订单 - 使用正确的格式
-                            cancel_response = exchange.private_post_trade_cancel_algos({
-                                'params': [{
-                                    'algoId': order['algoId'],
-                                    'instId': inst_id  # ✅ 修复：使用正确的格式 BTC-USDT-SWAP
-                                }]
-                            })
+        if not response or response.get('code') != '0' or not response.get('data'):
+            print(f"ℹ️ 无可取消算法订单或查询异常: {response}")
+            return
 
-                            if cancel_response.get('code') == '0':
-                                print(f"✅ 已取消旧的止盈止损订单: {order['algoId']}")
-                            else:
-                                print(f"⚠️ 取消订单失败: {cancel_response.get('msg')}")
-                        except Exception as e:
-                            print(f"⚠️ 取消订单异常 {order.get('algoId')}: {e}")
-        except Exception as e:
-            print(f"⚠️ 查询算法订单失败: {e}")
+        cancel_params = []
+        for order in response['data']:
+            ord_type = order.get('ordType')
+            if ord_type in ['conditional', 'oco']:
+                algo_id = order.get('algoId')
+                if algo_id:
+                    cancel_params.append({
+                        "instId": inst_id,
+                        "algoId": str(algo_id)
+                    })
+                else:
+                    print(f"⚠️ 发现算法订单但缺少 algoId: {order}")
 
-        # 重置全局变量
+        if cancel_params:
+            print("➡️ 准备取消算法订单: ", json.dumps(cancel_params, ensure_ascii=False))
+            cancel_response = exchange.request(
+                path="trade/cancel-algos",
+                api="private",
+                method="POST",
+                params=cancel_params
+            )
+            print("⬅️ 返回: ", cancel_response)
+
+            if cancel_response.get('code') == '0':
+                print(f"✅ 成功发送取消请求，共 {len(cancel_params)} 个")
+            else:
+                print(f"⚠️ 取消算法订单失败: {cancel_response}")
+        else:
+            print("ℹ️ 没有符合条件的止盈止损算法订单需要取消")
+
+        # 重置全局状态
         active_tp_sl_orders['take_profit_order_id'] = None
         active_tp_sl_orders['stop_loss_order_id'] = None
 
@@ -1082,94 +1105,199 @@ def check_existing_tp_sl_orders(position_side, stop_loss_price, take_profit_pric
         return False
 
 
-def set_stop_loss_take_profit(position_side, stop_loss_price, take_profit_price, position_size, force_update=False):
-    """
-    设置止盈止损订单 - 使用OKX算法订单API
 
+def set_stop_loss_take_profit(position_side, stop_loss_price, take_profit_price, position_size, force_update=False, auto_fix=True, tp_pct=0.05, sl_pct=0.02):
+    """
+    设置止盈止损订单 - 增强版（自动 TP/SL 百分比支持）
     参数:
         position_side: 'long' 或 'short'
-        stop_loss_price: 止损价格
-        take_profit_price: 止盈价格
-        position_size: 持仓数量
+        stop_loss_price: 如果为 None 则根据 entry_price 与 sl_pct 自动计算
+        take_profit_price: 如果为 None 则根据 entry_price 与 tp_pct 自动计算
+        position_size: 持仓数量 (正数)
         force_update: 是否强制更新（默认False，会检查是否已存在相同订单）
+        auto_fix: 若价格方向不符合规则，是否自动修正（默认True）
+        tp_pct: 止盈百分比 (默认 0.005 -> 0.5%)
+        sl_pct: 止损百分比 (默认 0.025 -> 2.5%)
+    返回:
+        True/False
+    说明:
+        - 若你传入 stop_loss_price/take_profit_price 为具体数值，则以该值为准（仍做合法性检查，可 auto_fix）。
+        - 若传入 None，则会尝试从上下文/全局或传入的 TRADE_CONFIG 中获取 entry_price/avg_entry_price 进行按百分比计算。
     """
     global active_tp_sl_orders
 
     try:
-        # 转换交易对格式：BTC/USDT:USDT -> BTC-USDT-SWAP
         inst_id = TRADE_CONFIG['symbol'].replace('/USDT:USDT', '-USDT-SWAP').replace('/', '-')
 
-        # 🆕 如果不是强制更新，先检查是否已存在相同订单
+        # 如果不是强制更新，先检查是否已存在相同订单
         if not force_update:
             if check_existing_tp_sl_orders(position_side, stop_loss_price, take_profit_price, position_size):
-                return True  # 订单已存在，无需重复创建
+                return True
 
-        # 取消现有的止盈止损订单
+        # 取消现有的止盈止损订单（如果有）
         cancel_existing_tp_sl_orders()
 
-        # 确定订单方向（平仓方向与开仓相反）
+        # 先尝试获取 entry_price（有时脚本会把 entry_price 存入 position 或 TRADE_CONFIG）
+        entry_price = None
+        # 尝试从 position/global/TRADE_CONFIG 获取
+        try:
+            # 如果外层有 position 对象，可传入；这里只是兜底检查
+            if 'position' in globals() and position is not None:
+                entry_price = float(position.get('avgEntryPrice') or position.get('entry_price') or 0) if isinstance(position, dict) else None
+        except Exception:
+            entry_price = None
+
+        # 如果没有 entry_price，从交易所获取最新成交价作为近似 entry（fallback）
+        if entry_price is None:
+            try:
+                ticker = exchange.fetch_ticker(TRADE_CONFIG['symbol'])
+                entry_price = float(ticker.get('last') or ticker.get('close') or 0)
+            except Exception:
+                try:
+                    t = exchange.public_get_market_ticker({'instId': inst_id})
+                    entry_price = float(t['data'][0]['last'])
+                except Exception:
+                    entry_price = None
+
+        # 打印基本信息
+        print(f"📊 [TP/SL] inst_id={inst_id} position_side={position_side} position_size={position_size}")
+        print(f"    entry_price (or fallback last) = {entry_price}")
+        print(f"    requested stop_loss_price = {stop_loss_price}")
+        print(f"    requested take_profit_price = {take_profit_price}")
+        print(f"    default tp_pct = {tp_pct*100:.3f}%, sl_pct = {sl_pct*100:.3f}%")
+
+        # 如果用户没有传 stop_loss_price / take_profit_price，则根据 entry_price 计算
+        if entry_price is not None:
+            if stop_loss_price is None:
+                if position_side == 'long':
+                    stop_loss_price = round(entry_price * (1 - sl_pct), 8)
+                else:
+                    stop_loss_price = round(entry_price * (1 + sl_pct), 8)
+                print(f"    auto-calculated stop_loss_price = {stop_loss_price}")
+            if take_profit_price is None:
+                if position_side == 'long':
+                    take_profit_price = round(entry_price * (1 + tp_pct), 8)
+                else:
+                    take_profit_price = round(entry_price * (1 - tp_pct), 8)
+                print(f"    auto-calculated take_profit_price = {take_profit_price}")
+        else:
+            # 如果没有 entry_price 且用户也没传价格，拒绝下单
+            if stop_loss_price is None or take_profit_price is None:
+                print("❌ 无法获取 entry_price 且未传入 stop_loss/take_profit，拒绝下单")
+                return False
+
+        # 再次获取最新市价（用于合法性校验）
+        last_price = None
+        try:
+            ticker = exchange.fetch_ticker(TRADE_CONFIG['symbol'])
+            last_price = float(ticker.get('last') or ticker.get('close') or 0)
+        except Exception:
+            try:
+                t = exchange.public_get_market_ticker({'instId': inst_id})
+                last_price = float(t['data'][0]['last'])
+            except Exception:
+                last_price = None
+
+        print(f"    last_price = {last_price}")
+
+        # 校验并基于持仓方向调整（long: SL < last < TP, short: TP < last < SL）
+        adjusted_sl = stop_loss_price
+        adjusted_tp = take_profit_price
+        eps = 0.001  # 0.1% nudge
+
+        if last_price is not None:
+            if position_side == 'long':
+                # SL must be < last_price
+                if float(adjusted_sl) >= last_price:
+                    if auto_fix:
+                        adjusted_sl = round(last_price * (1 - eps), 8)
+                        print(f"⚠️ long: SL {stop_loss_price} >= last {last_price}, auto-fix -> {adjusted_sl}")
+                    else:
+                        print(f"❌ long: SL {stop_loss_price} invalid (>= last). Refuse.")
+                        adjusted_sl = None
+                # TP must be > last_price
+                if float(adjusted_tp) <= last_price:
+                    if auto_fix:
+                        adjusted_tp = round(last_price * (1 + eps), 8)
+                        print(f"⚠️ long: TP {take_profit_price} <= last {last_price}, auto-fix -> {adjusted_tp}")
+                    else:
+                        print(f"❌ long: TP {take_profit_price} invalid (<= last). Refuse.")
+                        adjusted_tp = None
+            else:
+                # short: SL > last_price, TP < last_price
+                if float(adjusted_sl) <= last_price:
+                    if auto_fix:
+                        adjusted_sl = round(last_price * (1 + eps), 8)
+                        print(f"⚠️ short: SL {stop_loss_price} <= last {last_price}, auto-fix -> {adjusted_sl}")
+                    else:
+                        print(f"❌ short: SL {stop_loss_price} invalid (<= last). Refuse.")
+                        adjusted_sl = None
+                if float(adjusted_tp) >= last_price:
+                    if auto_fix:
+                        adjusted_tp = round(last_price * (1 - eps), 8)
+                        print(f"⚠️ short: TP {take_profit_price} >= last {last_price}, auto-fix -> {adjusted_tp}")
+                    else:
+                        print(f"❌ short: TP {take_profit_price} invalid (>= last). Refuse.")
+                        adjusted_tp = None
+
+        # 选择平仓方向
         close_side = 'sell' if position_side == 'long' else 'buy'
 
-        # 使用OKX的算法订单API设置止盈止损
-        # 方法1: 使用单独的止损和止盈订单
+        # 确保 tag 合法（无下划线，长度 <= 16）
+        tag_value = f"autoTPSL"
+        if len(tag_value) > 16:
+            tag_value = tag_value[:16]
 
-        # 设置止损订单 (Stop Loss)
-        if stop_loss_price:
+        # 下单：先 SL 再 TP（两单分开）
+        if adjusted_sl:
+            sl_params = {
+                'instId': inst_id,
+                'tdMode': 'cross',
+                'side': close_side,
+                'ordType': 'conditional',
+                'sz': str(position_size),
+                'slTriggerPx': str(adjusted_sl),
+                'slOrdPx': '-1',
+                'reduceOnly': 'true',
+                'tag': tag_value
+            }
+            print("📤 Sending SL params:", json.dumps(sl_params, ensure_ascii=False))
             try:
-                # 使用OKX的条件单API
-                sl_params = {
-                    'instId': inst_id,
-                    'tdMode': 'cross',  # 全仓模式
-                    'side': close_side,
-                    'ordType': 'conditional',  # 条件单
-                    'sz': str(position_size),
-                    'slTriggerPx': str(stop_loss_price),  # 止损触发价
-                    'slOrdPx': '-1',  # 市价单（-1表示市价）
-                    'reduceOnly': 'true',  # 只减仓
-                    'tag': 'c314b0aecb5bBCDE'  # 节点（默认，无需改动）
-                }
-
-                # 调用OKX的算法订单API
-                response = exchange.private_post_trade_order_algo(sl_params)
-
-                if response.get('code') == '0' and response.get('data'):
-                    algo_id = response['data'][0]['algoId']
+                sl_resp = exchange.private_post_trade_order_algo(sl_params)
+                print("📥 SL response:", json.dumps(sl_resp, ensure_ascii=False))
+                if sl_resp.get('code') == '0' and sl_resp.get('data'):
+                    algo_id = sl_resp['data'][0].get('algoId')
                     active_tp_sl_orders['stop_loss_order_id'] = algo_id
-                    print(f"✅ 止损订单已设置: 触发价={stop_loss_price}, 订单ID={algo_id}")
+                    print(f"✅ 止损订单已设置: trigger={adjusted_sl}, algoId={algo_id}")
                 else:
-                    print(f"❌ 设置止损订单失败: {response.get('msg')}")
-
+                    print(f"❌ 设置止损订单失败: {sl_resp}")
             except Exception as e:
-                print(f"❌ 设置止损订单失败: {e}")
+                print(f"❌ 设置止损订单异常: {e}")
 
-        # 设置止盈订单 (Take Profit)
-        if take_profit_price:
+        if adjusted_tp:
+            tp_params = {
+                'instId': inst_id,
+                'tdMode': 'cross',
+                'side': close_side,
+                'ordType': 'conditional',
+                'sz': str(position_size),
+                'tpTriggerPx': str(adjusted_tp),
+                'tpOrdPx': '-1',
+                'reduceOnly': 'true',
+                'tag': tag_value
+            }
+            print("📤 Sending TP params:", json.dumps(tp_params, ensure_ascii=False))
             try:
-                # 使用OKX的条件单API
-                tp_params = {
-                    'instId': inst_id,
-                    'tdMode': 'cross',  # 全仓模式
-                    'side': close_side,
-                    'ordType': 'conditional',  # 条件单
-                    'sz': str(position_size),
-                    'tpTriggerPx': str(take_profit_price),  # 止盈触发价
-                    'tpOrdPx': '-1',  # 市价单（-1表示市价）
-                    'reduceOnly': 'true',  # 只减仓
-                    'tag': 'c314b0aecb5bBCDE'  # 节点（默认，无需改动）
-                }
-
-                # 调用OKX的算法订单API
-                response = exchange.private_post_trade_order_algo(tp_params)
-
-                if response.get('code') == '0' and response.get('data'):
-                    algo_id = response['data'][0]['algoId']
+                tp_resp = exchange.private_post_trade_order_algo(tp_params)
+                print("📥 TP response:", json.dumps(tp_resp, ensure_ascii=False))
+                if tp_resp.get('code') == '0' and tp_resp.get('data'):
+                    algo_id = tp_resp['data'][0].get('algoId')
                     active_tp_sl_orders['take_profit_order_id'] = algo_id
-                    print(f"✅ 止盈订单已设置: 触发价={take_profit_price}, 订单ID={algo_id}")
+                    print(f"✅ 止盈订单已设置: trigger={adjusted_tp}, algoId={algo_id}")
                 else:
-                    print(f"❌ 设置止盈订单失败: {response.get('msg')}")
-
+                    print(f"❌ 设置止盈订单失败: {tp_resp}")
             except Exception as e:
-                print(f"❌ 设置止盈订单失败: {e}")
+                print(f"❌ 设置止盈订单异常: {e}")
 
         return True
 
@@ -1184,7 +1312,6 @@ def execute_intelligent_trade(signal_data, price_data):
 
     current_position = get_current_position()
 
-    # 防止频繁反转的逻辑保持不变
     if current_position and signal_data['signal'] != 'HOLD':
         current_side = current_position['side']  # 'long' 或 'short'
 
@@ -1195,17 +1322,16 @@ def execute_intelligent_trade(signal_data, price_data):
         else:
             new_side = None
 
-        # 如果方向相反，需要高信心才执行
-        # if new_side != current_side:
-        #     if signal_data['confidence'] != 'HIGH':
-        #         print(f"🔒 非高信心反转信号，保持现有{current_side}仓")
-        #         return
+        if new_side and new_side != current_side:
+            if signal_data.get('confidence') != 'HIGH':
+                print(f"🔒 非高信心反转信号，保持现有{current_side}仓")
+                return
 
-        #     if len(signal_history) >= 2:
-        #         last_signals = [s['signal'] for s in signal_history[-2:]]
-        #         if signal_data['signal'] in last_signals:
-        #             print(f"🔒 近期已出现{signal_data['signal']}信号，避免频繁反转")
-        #             return
+            if len(signal_history) >= 2:
+                last_signals = [s['signal'] for s in signal_history[-2:]]
+                if signal_data['signal'] in last_signals:
+                    print(f"🔒 近期已出现{signal_data['signal']}信号，避免频繁反转")
+                    return
 
     # 计算智能仓位
     position_size = calculate_intelligent_position(signal_data, price_data, current_position)
@@ -1499,34 +1625,36 @@ def analyze_with_deepseek_with_retry(price_data, max_retries=2):
 
 
 def wait_for_next_period():
-    """等待到下一个15分钟整点"""
     now = datetime.now()
-    current_minute = now.minute
-    current_second = now.second
+    tf = TRADE_CONFIG.get('timeframe', '15m')
+    unit = tf[-1]
+    value = int(tf[:-1]) if tf[:-1].isdigit() else 15
 
-    # 计算下一个整点时间（00, 15, 30, 45分钟）
-    next_period_minute = ((current_minute // 15) + 1) * 15
-    if next_period_minute == 60:
-        next_period_minute = 0
-
-    # 计算需要等待的总秒数
-    if next_period_minute > current_minute:
-        minutes_to_wait = next_period_minute - current_minute
+    if unit == 'm':
+        period_minutes = value
+    elif unit == 'h':
+        period_minutes = value * 60
+    elif unit == 'd':
+        period_minutes = value * 60 * 24
     else:
-        minutes_to_wait = 60 - current_minute + next_period_minute
+        period_minutes = 15
 
-    seconds_to_wait = minutes_to_wait * 60 - current_second
+    total_minutes = now.hour * 60 + now.minute
+    next_block = ((total_minutes // period_minutes) + 1) * period_minutes
+    minutes_to_wait = (next_block - total_minutes) % (24 * 60)
+    seconds_to_wait = minutes_to_wait * 60 - now.second
 
-    # 显示友好的等待时间
-    display_minutes = minutes_to_wait - 1 if current_second > 0 else minutes_to_wait
-    display_seconds = 60 - current_second if current_second > 0 else 0
-
-    if display_minutes > 0:
-        print(f"🕒 等待 {display_minutes} 分 {display_seconds} 秒到整点...")
+    if minutes_to_wait > 0:
+        display_minutes = minutes_to_wait - 1 if now.second > 0 else minutes_to_wait
+        display_seconds = 60 - now.second if now.second > 0 else 0
+        if display_minutes > 0:
+            print(f"🕒 等待 {display_minutes} 分 {display_seconds} 秒到整点...")
+        else:
+            print(f"🕒 等待 {display_seconds} 秒到整点...")
     else:
-        print(f"🕒 等待 {display_seconds} 秒到整点...")
+        print(f"🕒 等待 {60 - now.second} 秒到整点...")
 
-    return seconds_to_wait
+    return max(seconds_to_wait, 0)
 
 
 def trading_bot():
@@ -1678,7 +1806,11 @@ def main():
         print(f"⚠️ Web界面数据初始化失败: {e}")
         print("继续运行，将在首次交易时创建数据")
 
-    print("执行频率: 每15分钟整点执行")
+    tf = TRADE_CONFIG.get('timeframe', '15m')
+    unit = tf[-1]
+    value = tf[:-1] if tf[:-1].isdigit() else '15'
+    unit_cn = '分钟' if unit == 'm' else ('小时' if unit == 'h' else ('天' if unit == 'd' else '分钟'))
+    print(f"执行频率: 每{value}{unit_cn}整点执行")
 
     # 循环执行（不使用schedule）
     while True:
@@ -1690,3 +1822,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
