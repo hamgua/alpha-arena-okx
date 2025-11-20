@@ -202,6 +202,37 @@ def calculate_price_position(price_data):
         print(f"价格位置计算错误: {e}")
         return 50
 
+def calculate_decline_pattern(price_data):
+    """计算连续下跌模式指标"""
+    try:
+        kline_data = price_data.get('kline_data', [])
+        if len(kline_data) < 5:
+            return {'consecutive_declines': 0, 'total_decline': 0.0}
+        
+        # 获取最近5根K线
+        recent_klines = kline_data[-5:]
+        
+        consecutive_declines = 0
+        total_decline = 0.0
+        
+        # 从最新开始计算连续下跌
+        for kline in reversed(recent_klines):
+            if kline['close'] < kline['open']:  # 阴线
+                consecutive_declines += 1
+                decline = ((kline['open'] - kline['close']) / kline['open']) * 100
+                total_decline += decline
+            else:
+                break  # 遇到阳线停止计数
+        
+        return {
+            'consecutive_declines': consecutive_declines,
+            'total_decline': total_decline
+        }
+        
+    except Exception as e:
+        print(f"下跌模式计算错误: {e}")
+        return {'consecutive_declines': 0, 'total_decline': 0.0}
+
 def calculate_intelligent_position(signal_data, price_data, current_position):
     """计算智能仓位大小 - 修复版"""
     config = TRADE_CONFIG['position_management']
@@ -235,18 +266,44 @@ def calculate_intelligent_position(signal_data, price_data, current_position):
         else:
             trend_multiplier = 1.0
 
-        # 🎯 增强低价买入权重策略
+        # 🎯 增强连续下跌抄底策略
         rsi = price_data['technical_data'].get('rsi', 50)
         
         # 计算价格相对位置权重
         price_position = calculate_price_position(price_data)
-        position_weight = 1.0
         
-        # 低价买入权重增强
-        if price_position < 30:  # 价格处于低位
+        # 🆕 计算连续下跌指标
+        decline_data = calculate_decline_pattern(price_data)
+        decline_multiplier = 1.0
+        
+        # 连续下跌抄底权重
+        if decline_data['consecutive_declines'] >= 3:  # 连续3根阴线
+            decline_multiplier *= 1.8
+            print(f"🔻 连续{decline_data['consecutive_declines']}根阴线，抄底权重: 1.8x")
+        elif decline_data['consecutive_declines'] >= 2:  # 连续2根阴线
+            decline_multiplier *= 1.4
+            print(f"📉 连续{decline_data['consecutive_declines']}根阴线，抄底权重: 1.4x")
+        
+        # 下跌幅度权重
+        if decline_data['total_decline'] > 2.0:  # 累计下跌超过2%
+            decline_multiplier *= 1.3
+            print(f"📊 累计下跌{decline_data['total_decline']:.2f}%，抄底权重: 1.3x")
+        elif decline_data['total_decline'] > 1.0:  # 累计下跌超过1%
+            decline_multiplier *= 1.2
+            print(f"📊 累计下跌{decline_data['total_decline']:.2f}%，抄底权重: 1.2x")
+        
+        # 低位+下跌组合权重
+        position_weight = 1.0
+        if price_position < 30 and decline_data['consecutive_declines'] >= 2:
+            position_weight *= 2.2  # 低位+连续下跌，强力抄底
+            print(f"🎯 低位({price_position:.1f}%) + 连续下跌，强力抄底: 2.2x")
+        elif price_position < 40 and decline_data['consecutive_declines'] >= 2:
+            position_weight *= 1.8  # 相对低位+连续下跌
+            print(f"🎯 相对低位({price_position:.1f}%) + 连续下跌: 1.8x")
+        elif price_position < 30:  # 仅价格低位
             position_weight *= 1.5
             print(f"🎯 价格低位({price_position:.1f}%)，加大仓位权重: 1.5x")
-        elif price_position > 70:  # 价格处于高位
+        elif price_position > 70:  # 价格高位
             position_weight *= 0.7
             print(f"⚠️ 价格高位({price_position:.1f}%)，减小仓位权重: 0.7x")
 
@@ -274,8 +331,8 @@ def calculate_intelligent_position(signal_data, price_data, current_position):
         elif rsi > 75 or rsi < 25:
             rsi_multiplier = 0.9
 
-        # 🎯 计算最终仓位（加入低价买入权重）
-        suggested_usdt = base_usdt * confidence_multiplier * trend_multiplier * rsi_multiplier * micro_multiplier * position_weight
+        # 🎯 计算最终仓位（加入连续下跌抄底权重）
+        suggested_usdt = base_usdt * confidence_multiplier * trend_multiplier * rsi_multiplier * micro_multiplier * position_weight * decline_multiplier
 
         # 风险管理：不超过总资金的指定比例 - 删除重复定义
         max_usdt = usdt_balance * config['max_position_ratio']
@@ -291,6 +348,7 @@ def calculate_intelligent_position(signal_data, price_data, current_position):
         print(f"   - 趋势倍数: {trend_multiplier}")
         print(f"   - RSI倍数: {rsi_multiplier}")
         print(f"   - 位置权重: {position_weight}")
+        print(f"   - 下跌权重: {decline_multiplier}")
         print(f"   - 波动倍数: {micro_multiplier}")
         print(f"   - 建议USDT: {suggested_usdt:.2f}")
         print(f"   - 最终USDT: {final_usdt:.2f}")
