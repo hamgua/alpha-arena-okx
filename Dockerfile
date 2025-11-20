@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y \
     g++ \
     curl \
     procps \
+    vim \
     && rm -rf /var/lib/apt/lists/*
 
 # 复制依赖文件
