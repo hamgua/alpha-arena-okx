@@ -174,6 +174,34 @@ active_tp_sl_orders = {
 }
 
 
+def calculate_price_position(price_data):
+    """计算当前价格在布林带中的相对位置（0-100%）"""
+    try:
+        kline_data = price_data.get('kline_data', [])
+        if len(kline_data) < 20:
+            return 50  # 数据不足，返回中性值
+            
+        closes = [k['close'] for k in kline_data[-20:]]  # 最近20根K线收盘价
+        current_price = price_data['price']
+        
+        # 计算布林带
+        sma_20 = sum(closes) / len(closes)
+        std_dev = (sum((x - sma_20) ** 2 for x in closes) / len(closes)) ** 0.5
+        
+        upper_band = sma_20 + 2 * std_dev
+        lower_band = sma_20 - 2 * std_dev
+        
+        # 计算相对位置（0-100）
+        if upper_band == lower_band:
+            return 50
+            
+        position = ((current_price - lower_band) / (upper_band - lower_band)) * 100
+        return max(0, min(100, position))  # 限制在0-100之间
+        
+    except Exception as e:
+        print(f"价格位置计算错误: {e}")
+        return 50
+
 def calculate_intelligent_position(signal_data, price_data, current_position):
     """计算智能仓位大小 - 修复版"""
     config = TRADE_CONFIG['position_management']
@@ -207,31 +235,47 @@ def calculate_intelligent_position(signal_data, price_data, current_position):
         else:
             trend_multiplier = 1.0
 
-        # 极致优化RSI策略 - 超敏感模式
+        # 🎯 增强低价买入权重策略
         rsi = price_data['technical_data'].get('rsi', 50)
-        current_price = price_data['price']
         
+        # 计算价格相对位置权重
+        price_position = calculate_price_position(price_data)
+        position_weight = 1.0
+        
+        # 低价买入权重增强
+        if price_position < 30:  # 价格处于低位
+            position_weight *= 1.5
+            print(f"🎯 价格低位({price_position:.1f}%)，加大仓位权重: 1.5x")
+        elif price_position > 70:  # 价格处于高位
+            position_weight *= 0.7
+            print(f"⚠️ 价格高位({price_position:.1f}%)，减小仓位权重: 0.7x")
+
         # 超敏感价格变化检测
         price_change = abs(price_data.get('price_change', 0))
-        if price_change < 0.05:  # 极微小波动
+        if price_change < 0.02:  # 极低波动
             micro_multiplier = config.get('micro_movement_multiplier', 3.0)
+        elif price_change < 0.05:
+            micro_multiplier = 2.0
         elif price_change < 0.1:
-            micro_multiplier = 2.5
+            micro_multiplier = 1.5
         else:
             micro_multiplier = 1.0
             
-        # RSI超敏感阈值
-        if rsi > 85 or rsi < 15:  # 极值区域
-            rsi_multiplier = 1.5
+        # RSI超卖超买权重调整
+        rsi_multiplier = 1.0
+        if rsi < 35:  # 超卖区域 - 加大买入权重
+            rsi_multiplier = 1.4
+            print(f"🟢 RSI超卖({rsi:.1f})，加大仓位权重: 1.4x")
+        elif rsi > 70:  # 超买区域 - 减小买入权重
+            rsi_multiplier = 0.6
+            print(f"🔴 RSI超买({rsi:.1f})，减小仓位权重: 0.6x")
         elif rsi > 80 or rsi < 20:
             rsi_multiplier = 1.2
         elif rsi > 75 or rsi < 25:
             rsi_multiplier = 0.9
-        else:
-            rsi_multiplier = 1.0
 
-        # 计算建议投入USDT金额 - 加入小波动放大器
-        suggested_usdt = base_usdt * confidence_multiplier * trend_multiplier * rsi_multiplier * micro_multiplier
+        # 🎯 计算最终仓位（加入低价买入权重）
+        suggested_usdt = base_usdt * confidence_multiplier * trend_multiplier * rsi_multiplier * micro_multiplier * position_weight
 
         # 风险管理：不超过总资金的指定比例 - 删除重复定义
         max_usdt = usdt_balance * config['max_position_ratio']
@@ -246,6 +290,8 @@ def calculate_intelligent_position(signal_data, price_data, current_position):
         print(f"   - 信心倍数: {confidence_multiplier}")
         print(f"   - 趋势倍数: {trend_multiplier}")
         print(f"   - RSI倍数: {rsi_multiplier}")
+        print(f"   - 位置权重: {position_weight}")
+        print(f"   - 波动倍数: {micro_multiplier}")
         print(f"   - 建议USDT: {suggested_usdt:.2f}")
         print(f"   - 最终USDT: {final_usdt:.2f}")
         print(f"   - 合约乘数: {TRADE_CONFIG['contract_size']}")
@@ -843,41 +889,65 @@ def analyze_with_deepseek(price_data):
     suggested_tp_sl = calculate_dynamic_tp_sl('BUY', price_data['price'], market_state, current_pos)
     tp_sl_hint = f"建议止损±{suggested_tp_sl['sl_pct']*100:.1f}%, 止盈±{suggested_tp_sl['tp_pct']*100:.1f}%"
 
-    # 简化优化的Prompt
+    # 🎯 优化的低价买入权重判断
+    # 计算相对价格位置（0-100，越低越接近底部）
+    price_position = calculate_price_position(price_data)
+    
+    # 计算波动率折扣因子（低波动时更敏感）
+    volatility_discount = max(0.5, 2.0 - market_state['atr_pct'])
+    
+    # 计算买入权重增强
+    buy_weight_multiplier = 1.0
+    if price_position < 30:  # 价格处于相对低位
+        buy_weight_multiplier *= 1.5
+    if market_state['atr_pct'] < 1.5:  # 低波动市场
+        buy_weight_multiplier *= 1.3
+    if price_data['technical_data'].get('rsi', 50) < 35:  # 超卖区域
+        buy_weight_multiplier *= 1.4
+    
+    # 优化的Prompt - 增强低价买入逻辑
     prompt = f"""
-你是专业的BTC交易分析师。{TRADE_CONFIG['timeframe']}周期分析：
+你是专业的BTC波段交易大师，专注精准抄底。{TRADE_CONFIG['timeframe']}周期分析：
 
-【核心数据】
-价格: ${price_data['price']:,.2f} ({price_data['price_change']:+.2f}%)
-市场状态: {market_state['state']} (波动率: {market_state['atr_pct']:.2f}%)
-趋势: {price_data['trend_analysis'].get('overall', 'N/A')}
-RSI: {price_data['technical_data'].get('rsi', 0):.1f} | MACD: {price_data['trend_analysis'].get('macd', 'N/A')}
-持仓: {position_text}
-{signal_text}
+【🎯 核心价格分析】
+当前价格: ${price_data['price']:,.2f}
+相对位置: {price_position:.1f}% (0%=底部,100%=顶部)
+价格变化: {price_data['price_change']:+.2f}%
+波动率: {market_state['atr_pct']:.2f}%
 
-{kline_text}
+【📊 技术状态】
+RSI: {price_data['technical_data'].get('rsi', 50):.1f} ({'超卖' if price_data['technical_data'].get('rsi', 50) < 35 else '正常' if price_data['technical_data'].get('rsi', 50) < 70 else '超买'})
+MACD: {price_data['trend_analysis'].get('macd', 'N/A')}
+均线状态: {price_data['trend_analysis'].get('overall', 'N/A')}
 
-{technical_analysis}
+【💰 博弈策略】
+价格低位权重: {buy_weight_multiplier:.1f}x
+超卖信号: {'✅' if price_data['technical_data'].get('rsi', 50) < 35 else '❌'}
+低波动机会: {'✅' if market_state['atr_pct'] < 1.5 else '❌'}
 
-{sentiment_text}
+【🎯 买入决策逻辑】
+当满足以下任一条件时优先考虑BUY：
+1. 价格处于30%以下低位 + RSI < 35 → HIGH信心BUY
+2. 价格微跌(-0.5%以内) + 低波动 → MEDIUM信心BUY  
+3. 连续3根阴线后首根阳线 → MEDIUM信心BUY
+4. 价格触及布林带下轨 → HIGH信心BUY
 
-【决策规则】
-1. 强趋势市场(均线多头/空头排列) → 跟随趋势 BUY/SELL
-2. 震荡市场(均线纠缠) → 等待突破 HOLD
-3. 反转信号 → 需2+指标确认
-4. RSI仅辅助，不作主要依据
-5. BTC偏多头，上涨趋势可积极
-
-【止盈止损】
+【⚠️ 风险控制】
 {tp_sl_hint}
-- 持仓盈利>5% → 移动止损到保本+1%
-- 持仓亏损>3% → 考虑止损
+仓位管理: 低位买入可加大仓位，但单次不超过30%
+止损设置: 严格2%止损，确保小亏大盈
+
+【持仓状态】
+{position_text}
+
+【市场情绪】
+{sentiment_text}
 
 【输出格式】
 严格JSON格式：
 {{
     "signal": "BUY|SELL|HOLD",
-    "reason": "核心理由(30字内)",
+    "reason": "买入理由(如:超卖反弹/低位抄底/震荡底部)",
     "stop_loss": 具体价格数字,
     "take_profit": 具体价格数字,
     "confidence": "HIGH|MEDIUM|LOW"
