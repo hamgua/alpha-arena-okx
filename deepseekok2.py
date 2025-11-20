@@ -203,35 +203,46 @@ def calculate_price_position(price_data):
         return 50
 
 def calculate_decline_pattern(price_data):
-    """计算连续下跌模式指标"""
+    """计算长期连续下跌模式指标"""
     try:
         kline_data = price_data.get('kline_data', [])
-        if len(kline_data) < 5:
-            return {'consecutive_declines': 0, 'total_decline': 0.0}
+        if len(kline_data) < 12:  # 至少12根K线（3小时数据）
+            return {'consecutive_declines': 0, 'total_decline': 0.0, 'decline_duration': 0}
         
-        # 获取最近5根K线
-        recent_klines = kline_data[-5:]
+        # 获取最近12根K线（3小时 = 12×15分钟）
+        recent_klines = kline_data[-12:]
         
         consecutive_declines = 0
         total_decline = 0.0
+        max_consecutive = 0
+        current_streak = 0
         
-        # 从最新开始计算连续下跌
+        # 计算最长连续下跌序列
         for kline in reversed(recent_klines):
             if kline['close'] < kline['open']:  # 阴线
-                consecutive_declines += 1
+                current_streak += 1
                 decline = ((kline['open'] - kline['close']) / kline['open']) * 100
                 total_decline += decline
+                max_consecutive = max(max_consecutive, current_streak)
             else:
-                break  # 遇到阳线停止计数
+                current_streak = 0
+                break  # 遇到阳线停止当前序列
+        
+        # 使用最长连续下跌序列
+        consecutive_declines = max_consecutive
+        
+        # 计算下跌持续时间（分钟）
+        decline_duration = consecutive_declines * 15  # 每根K线15分钟
         
         return {
             'consecutive_declines': consecutive_declines,
-            'total_decline': total_decline
+            'total_decline': total_decline,
+            'decline_duration': decline_duration
         }
         
     except Exception as e:
         print(f"下跌模式计算错误: {e}")
-        return {'consecutive_declines': 0, 'total_decline': 0.0}
+        return {'consecutive_declines': 0, 'total_decline': 0.0, 'decline_duration': 0}
 
 def calculate_intelligent_position(signal_data, price_data, current_position):
     """计算智能仓位大小 - 修复版"""
@@ -276,21 +287,24 @@ def calculate_intelligent_position(signal_data, price_data, current_position):
         decline_data = calculate_decline_pattern(price_data)
         decline_multiplier = 1.0
         
-        # 连续下跌抄底权重
-        if decline_data['consecutive_declines'] >= 3:  # 连续3根阴线
-            decline_multiplier *= 1.8
-            print(f"🔻 连续{decline_data['consecutive_declines']}根阴线，抄底权重: 1.8x")
-        elif decline_data['consecutive_declines'] >= 2:  # 连续2根阴线
-            decline_multiplier *= 1.4
-            print(f"📉 连续{decline_data['consecutive_declines']}根阴线，抄底权重: 1.4x")
-        
-        # 下跌幅度权重
-        if decline_data['total_decline'] > 2.0:  # 累计下跌超过2%
-            decline_multiplier *= 1.3
-            print(f"📊 累计下跌{decline_data['total_decline']:.2f}%，抄底权重: 1.3x")
-        elif decline_data['total_decline'] > 1.0:  # 累计下跌超过1%
+        # 🆕 长期下跌抄底权重（3小时周期）
+        if decline_data['consecutive_declines'] >= 6:  # 连续6根阴线（1.5小时）
+            decline_multiplier *= 2.0
+            print(f"🔻 长期下跌{decline_data['decline_duration']}分钟，强力抄底: 2.0x")
+        elif decline_data['consecutive_declines'] >= 4:  # 连续4根阴线（1小时）
+            decline_multiplier *= 1.6
+            print(f"📉 中期下跌{decline_data['decline_duration']}分钟，抄底权重: 1.6x")
+        elif decline_data['consecutive_declines'] >= 2:  # 连续2根阴线（30分钟）
             decline_multiplier *= 1.2
-            print(f"📊 累计下跌{decline_data['total_decline']:.2f}%，抄底权重: 1.2x")
+            print(f"📊 短期下跌{decline_data['decline_duration']}分钟，抄底权重: 1.2x")
+        
+        # 🆕 长期下跌幅度权重
+        if decline_data['total_decline'] > 3.0:  # 累计下跌超过3%（3小时）
+            decline_multiplier *= 1.4
+            print(f"📊 长期累计下跌{decline_data['total_decline']:.2f}%，抄底权重: 1.4x")
+        elif decline_data['total_decline'] > 1.5:  # 累计下跌超过1.5%
+            decline_multiplier *= 1.3
+            print(f"📊 中期累计下跌{decline_data['total_decline']:.2f}%，抄底权重: 1.3x")
         
         # 低位+下跌组合权重
         position_weight = 1.0
@@ -983,12 +997,13 @@ MACD: {price_data['trend_analysis'].get('macd', 'N/A')}
 超卖信号: {'✅' if price_data['technical_data'].get('rsi', 50) < 35 else '❌'}
 低波动机会: {'✅' if market_state['atr_pct'] < 1.5 else '❌'}
 
-【🎯 买入决策逻辑】
+【🎯 长期抄底决策逻辑】
 当满足以下任一条件时优先考虑BUY：
-1. 价格处于30%以下低位 + RSI < 35 → HIGH信心BUY
-2. 价格微跌(-0.5%以内) + 低波动 → MEDIUM信心BUY  
-3. 连续3根阴线后首根阳线 → MEDIUM信心BUY
-4. 价格触及布林带下轨 → HIGH信心BUY
+1. 长期下跌（1.5小时+）+ 低位 → HIGH信心BUY
+2. 中期下跌（1小时+）+ RSI < 35 → HIGH信心BUY
+3. 短期下跌（30分钟+）+ 价格触及布林带下轨 → MEDIUM信心BUY
+4. 累计下跌>3% + 超卖信号 → HIGH信心BUY
+5. 下跌后出现首根阳线 → 反转确认BUY
 
 【⚠️ 风险控制】
 {tp_sl_hint}
