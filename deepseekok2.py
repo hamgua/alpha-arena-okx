@@ -56,7 +56,7 @@ TRADE_CONFIG = {
     # 极致优化仓位参数 - 微小波动也能产生收益
     'position_management': {
         'enable_intelligent_position': True,
-        'base_usdt_amount': 25,  # 大幅提高基础投入
+        'base_usdt_amount': float(os.getenv('BASE_USDT_AMOUNT', '25')),  # 从环境变量读取，默认25
         'high_confidence_multiplier': 5.0,  # 高信心时5倍仓位
         'medium_confidence_multiplier': 3.0,
         'low_confidence_multiplier': 2.0,
