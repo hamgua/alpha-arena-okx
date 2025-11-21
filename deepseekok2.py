@@ -56,7 +56,7 @@ TRADE_CONFIG = {
     # 极致优化仓位参数 - 微小波动也能产生收益
     'position_management': {
         'enable_intelligent_position': True,
-        'base_usdt_amount': float(os.getenv('BASE_USDT_AMOUNT', '25')),  # 从环境变量读取，默认25
+        'base_usdt_amount': 25,  # 大幅提高基础投入
         'high_confidence_multiplier': 5.0,  # 高信心时5倍仓位
         'medium_confidence_multiplier': 3.0,
         'low_confidence_multiplier': 2.0,
@@ -466,7 +466,7 @@ def calculate_decline_pattern(price_data):
             'confirmation_strength': 0
         }
 
-def calculate_intelligent_position(signal_data, price_data, current_position):
+def calculate_intelligent_position(signal_data, price_data):
     """计算智能仓位大小 - 修复版"""
     config = TRADE_CONFIG['position_management']
 
@@ -1101,12 +1101,82 @@ def calculate_dynamic_tp_sl(signal, current_price, market_state, position=None):
 
 
 def validate_ai_signal(ai_signal, price_data, tech_data):
-    """量化验证AI信号，防止明显错误"""
+    """量化验证AI信号，防止明显错误和快速交易"""
 
     signal = ai_signal.get('signal', 'HOLD')
     tech = tech_data
+    current_price = price_data['price']
+    kline_data = price_data.get('kline_data', [])
 
-    # 规则1: RSI极端值检查
+    # 🆕 新增：K线状态验证
+    def get_current_kline_state():
+        """获取当前K线状态"""
+        if len(kline_data) < 2:
+            return {'is_red': False, 'is_green': False, 'change': 0}
+        
+        latest_kline = kline_data[-1]
+        change = ((latest_kline['close'] - latest_kline['open']) / latest_kline['open']) * 100
+        
+        return {
+            'is_red': latest_kline['close'] < latest_kline['open'],  # 阴线
+            'is_green': latest_kline['close'] > latest_kline['open'],  # 阳线
+            'change': change,
+            'open': latest_kline['open'],
+            'close': latest_kline['close']
+        }
+
+    # 🆕 新增：交易冷却期检查
+    def check_trade_cooldown():
+        """检查是否有足够的交易冷却期"""
+        if len(signal_history) < 2:
+            return True
+        
+        # 检查最近两次交易的时间间隔
+        last_trade = signal_history[-1]
+        if 'timestamp' in last_trade:
+            try:
+                last_time = datetime.strptime(last_trade['timestamp'], '%Y-%m-%d %H:%M:%S')
+                current_time = datetime.now()
+                time_diff = (current_time - last_time).total_seconds() / 60  # 分钟
+                
+                # 最少冷却5分钟
+                if time_diff < 5:
+                    print(f"🚫 交易冷却期不足：{time_diff:.1f}分钟 < 5分钟")
+                    return False
+            except:
+                pass
+        return True
+
+    # 🆕 新增：K线验证逻辑
+    kline_state = get_current_kline_state()
+    
+    # 规则0: 交易冷却期检查
+    if not check_trade_cooldown():
+        ai_signal['signal'] = 'HOLD'
+        ai_signal['reason'] = "交易冷却期不足，避免频繁交易"
+        return ai_signal
+
+    # 规则1: K线状态验证 - 防止在阳线高位买入
+    if signal == 'BUY':
+        if kline_state['is_green'] and kline_state['change'] > 0.5:
+            print(f"⚠️ 当前阳线上涨{kline_state['change']:.2f}%，不适合追高买入")
+            ai_signal['confidence'] = 'LOW'
+            ai_signal['reason'] += f" [阳线上涨{kline_state['change']:.2f}%]"
+        
+        # 新增：阴线买入验证
+        elif kline_state['is_red'] or kline_state['change'] < -0.2:
+            print(f"✅ 阴线或下跌{kline_state['change']:.2f}%，符合买入条件")
+        else:
+            print(f"⚠️ 当前状态不适合买入：{kline_state['change']:.2f}%")
+            ai_signal['confidence'] = 'LOW'
+
+    if signal == 'SELL':
+        if kline_state['is_red'] and kline_state['change'] < -0.5:
+            print(f"⚠️ 当前阴线下跌{kline_state['change']:.2f}%，不适合杀跌卖出")
+            ai_signal['confidence'] = 'LOW'
+            ai_signal['reason'] += f" [阴线下跌{kline_state['change']:.2f}%]"
+
+    # 规则2: RSI极端值检查
     rsi = tech.get('rsi', 50)
     if rsi > 80 and signal == 'BUY':
         print("⚠️ RSI超买(>80)，降低BUY信号信心")
@@ -1117,38 +1187,6 @@ def validate_ai_signal(ai_signal, price_data, tech_data):
         print("⚠️ RSI超卖(<20)，降低SELL信号信心")
         ai_signal['confidence'] = 'LOW'
         ai_signal['reason'] += " [RSI超卖警告]"
-
-    # 规则2: 趋势一致性检查
-    trend = price_data.get('trend_analysis', {}).get('overall', '震荡整理')
-    confidence = ai_signal.get('confidence', 'MEDIUM')
-
-    if trend == "强势上涨" and signal == 'SELL':
-        print("⚠️ 强上涨趋势中出现SELL信号，需高信心")
-        if confidence != 'HIGH':
-            ai_signal['signal'] = 'HOLD'
-            ai_signal['reason'] = "趋势与信号冲突，保持观望"
-            print("🔄 信号已修正为HOLD")
-
-    if trend == "强势下跌" and signal == 'BUY':
-        print("⚠️ 强下跌趋势中出现BUY信号，需高信心")
-        if confidence != 'HIGH':
-            ai_signal['signal'] = 'HOLD'
-            ai_signal['reason'] = "趋势与信号冲突，保持观望"
-            print("🔄 信号已修正为HOLD")
-
-    # 规则3: MACD背离检查
-    macd = tech.get('macd', 0)
-    macd_signal_line = tech.get('macd_signal', 0)
-
-    if macd > macd_signal_line and signal == 'SELL':
-        print("⚠️ MACD多头但信号SELL，降低信心")
-        if ai_signal.get('confidence') == 'HIGH':
-            ai_signal['confidence'] = 'MEDIUM'
-
-    if macd < macd_signal_line and signal == 'BUY':
-        print("⚠️ MACD空头但信号BUY，降低信心")
-        if ai_signal.get('confidence') == 'HIGH':
-            ai_signal['confidence'] = 'MEDIUM'
 
     # 规则4: 止盈止损合理性检查
     current_price = price_data['price']
@@ -1278,6 +1316,7 @@ MACD: {price_data['trend_analysis'].get('macd', 'N/A')}
 
 【持仓状态】
 {position_text}
+{last_signal_info}
 
 【市场情绪】
 {sentiment_text}
@@ -1777,7 +1816,7 @@ def execute_intelligent_trade(signal_data, price_data):
                     return
 
     # 计算智能仓位
-    position_size = calculate_intelligent_position(signal_data, price_data, current_position)
+    position_size = calculate_intelligent_position(signal_data, price_data)
 
     print(f"交易信号: {signal_data['signal']}")
     print(f"信心程度: {signal_data['confidence']}")
