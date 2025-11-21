@@ -1169,29 +1169,53 @@ def validate_ai_signal(ai_signal, price_data, tech_data):
         print(f"   ❌ 验证结果: 跳过交易 (冷却期不足)")
         return ai_signal
 
-    # 规则1: K线状态验证 - 防止在阳线高位买入
+    # 规则1: K线状态验证 - 防止在阳线高位买入，RSI极端时放宽限制
     if signal == 'BUY':
         print(f"   🔍 检查BUY信号合理性...")
+        
+        # 获取RSI用于智能调整
+        rsi = tech.get('rsi', 50)
+        
+        # 极端超卖时放宽阳线限制（RSI < 25）
         if kline_state['is_green'] and kline_state['change'] > 0.5:
-            print(f"   ⚠️ 拒绝原因: 阳线上涨{kline_state['change']:.2f}%，追高风险高")
-            ai_signal['confidence'] = 'LOW'
-            ai_signal['reason'] += f" [阳线上涨{kline_state['change']:.2f}%]"
+            if rsi < 25:  # 极端超卖，允许小幅反弹买入
+                print(f"   ✅ 超卖反弹: RSI{rsi:.1f}超卖，阳线{kline_state['change']:.2f}%视为反弹信号")
+            else:
+                print(f"   ⚠️ 拒绝原因: 阳线上涨{kline_state['change']:.2f}%，追高风险高")
+                ai_signal['confidence'] = 'LOW'
+                ai_signal['reason'] += f" [阳线上涨{kline_state['change']:.2f}%]"
         
         # 新增：阴线买入验证
         elif kline_state['is_red'] or kline_state['change'] < -0.2:
             print(f"   ✅ 通过验证: 阴线或下跌{kline_state['change']:.2f}%，适合抄底")
         else:
-            print(f"   ⚠️ 谨慎信号: 当前状态{kline_state['change']:+.2f}%，降低信心")
-            ai_signal['confidence'] = 'LOW'
+            # 小幅阳线但在低位，可以谨慎买入
+            if rsi < 30:
+                print(f"   ✅ 低位反弹: RSI{rsi:.1f}低位，小幅阳线{kline_state['change']:.2f}%可接受")
+            else:
+                print(f"   ⚠️ 谨慎信号: 当前状态{kline_state['change']:+.2f}%，降低信心")
+                ai_signal['confidence'] = 'LOW'
 
     if signal == 'SELL':
         print(f"   🔍 检查SELL信号合理性...")
+        
+        # 获取RSI用于智能调整
+        rsi = tech.get('rsi', 50)
+        
+        # 极端超买时放宽阴线限制（RSI > 75）
         if kline_state['is_red'] and kline_state['change'] < -0.5:
-            print(f"   ⚠️ 拒绝原因: 阴线下跌{kline_state['change']:.2f}%，杀跌风险高")
-            ai_signal['confidence'] = 'LOW'
-            ai_signal['reason'] += f" [阴线下跌{kline_state['change']:.2f}%]"
+            if rsi > 75:  # 极端超买，允许小幅回调卖出
+                print(f"   ✅ 超买回调: RSI{rsi:.1f}超买，阴线{kline_state['change']:.2f}%视为回调信号")
+            else:
+                print(f"   ⚠️ 拒绝原因: 阴线下跌{kline_state['change']:.2f}%，杀跌风险高")
+                ai_signal['confidence'] = 'LOW'
+                ai_signal['reason'] += f" [阴线下跌{kline_state['change']:.2f}%]"
         else:
-            print(f"   ✅ 通过验证: 当前状态适合卖出")
+            # 小幅阴线但在高位，可以谨慎卖出
+            if rsi > 70:
+                print(f"   ✅ 高位回调: RSI{rsi:.1f}高位，小幅阴线{kline_state['change']:.2f}%可接受")
+            else:
+                print(f"   ✅ 通过验证: 当前状态适合卖出")
 
     # 规则2: RSI极端值检查
     rsi = tech.get('rsi', 50)
