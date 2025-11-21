@@ -63,6 +63,25 @@ TRADE_CONFIG = {
         'max_position_ratio': 0.9,  # 最大仓位90%
         'trend_strength_multiplier': 2.0,
         'micro_movement_multiplier': 3.0  # 小波动3倍放大
+    },
+    
+    # 🆕 连续阴线抄底配置 - 小白用户友好
+    # 📖 使用说明：
+    # - data_window: 分析多少根K线（20=5小时，15=3.75小时）
+    # - min_decline_duration: 最少连续下跌几根才考虑抄底（4根=1小时）
+    # - strong_decline_duration: 强力抄底需要连续下跌几根（6根=1.5小时）
+    # - min_total_decline: 最少累计跌幅多少百分比才考虑抄底
+    # - strong_total_decline: 强力抄底需要累计跌幅多少百分比
+    # - volume_confirmation: 是否需要成交量放大确认反转
+    # - require_reversal_signal: 是否必须出现阳线/锤子线等反转信号
+    'decline_detection': {
+        'data_window': 20,           # 分析窗口：20根K线（5小时数据）
+        'min_decline_duration': 4,   # 最少连续阴线：4根（1小时）
+        'strong_decline_duration': 6, # 强连续阴线：6根（1.5小时）
+        'min_total_decline': 1.5,    # 最少累计跌幅：1.5%
+        'strong_total_decline': 4.0, # 强累计跌幅：4.0%
+        'volume_confirmation': True, # 成交量确认
+        'require_reversal_signal': True  # 必须反转信号确认
     }
 }
 
@@ -203,20 +222,25 @@ def calculate_price_position(price_data):
         return 50
 
 def calculate_decline_pattern(price_data):
-    """增强下跌确认和反转信号检测"""
+    """增强下跌确认和反转信号检测 - 使用配置文件参数"""
     try:
+        config = TRADE_CONFIG['decline_detection']
         kline_data = price_data.get('kline_data', [])
-        if len(kline_data) < 20:  # 至少20根K线（5小时数据）
+        
+        # 使用配置中的数据窗口
+        data_window = config['data_window']
+        if len(kline_data) < data_window:
             return {
                 'consecutive_declines': 0, 
                 'total_decline': 0.0, 
                 'decline_duration': 0,
                 'is_reversal': False,
-                'confirmation_strength': 0
+                'confirmation_strength': 0,
+                'volume_confirmation': False
             }
         
-        # 获取最近20根K线（5小时数据）
-        recent_klines = kline_data[-20:]
+        # 使用配置中的数据窗口
+        recent_klines = kline_data[-data_window:]
         
         # 🆕 计算下跌确认指标
         decline_data = {
@@ -335,37 +359,40 @@ def calculate_intelligent_position(signal_data, price_data, current_position):
         decline_data = calculate_decline_pattern(price_data)
         decline_multiplier = 1.0
         
-        # 🆕 增强抄底确认机制
+        # 🆕 使用配置文件参数的增强抄底确认机制
+        config = TRADE_CONFIG['decline_detection']
         decline_multiplier = 1.0
         
-        # 1. 反转确认优先
-        if decline_data['is_reversal'] and decline_data['confirmation_strength'] >= 3:
-            # 强反转信号：下跌后出现明确反弹
-            decline_multiplier *= 2.5
-            print(f"🔄 强反转确认，抄底权重: 2.5x")
-        elif decline_data['is_reversal'] and decline_data['confirmation_strength'] >= 2:
-            # 中等反转信号：锤子线等
-            decline_multiplier *= 1.8
-            print(f"🔄 中等反转确认，抄底权重: 1.8x")
+        # 1. 反转确认优先（必须满足配置要求）
+        if config['require_reversal_signal'] and decline_data['is_reversal']:
+            if decline_data['confirmation_strength'] >= 3:
+                decline_multiplier *= 2.5
+                print(f"🔄 强反转确认，抄底权重: 2.5x")
+            elif decline_data['confirmation_strength'] >= 2:
+                decline_multiplier *= 1.8
+                print(f"🔄 中等反转确认，抄底权重: 1.8x")
         
-        # 2. 长期下跌+成交量确认
-        elif decline_data['consecutive_declines'] >= 6:  # 1.5小时下跌
-            if decline_data['volume_confirmation']:
+        # 2. 长期下跌确认（使用配置阈值）
+        elif decline_data['consecutive_declines'] >= config['strong_decline_duration']:
+            if config['volume_confirmation'] and decline_data['volume_confirmation']:
                 decline_multiplier *= 2.0
-                print(f"🔻 长期下跌+放量确认，强力抄底: 2.0x")
+                print(f"🔻 长期下跌{decline_data['decline_duration']}分钟+放量确认，强力抄底: 2.0x")
             else:
                 decline_multiplier *= 1.6
                 print(f"📉 长期下跌{decline_data['decline_duration']}分钟，谨慎抄底: 1.6x")
         
         # 3. 中期下跌确认
-        elif decline_data['consecutive_declines'] >= 4:  # 1小时下跌
+        elif decline_data['consecutive_declines'] >= config['min_decline_duration']:
             decline_multiplier *= 1.3
             print(f"📊 中期下跌{decline_data['decline_duration']}分钟，抄底权重: 1.3x")
         
-        # 4. 下跌幅度补充权重
-        if decline_data['total_decline'] > 4.0:  # 累计下跌超过4%（5小时）
+        # 4. 下跌幅度补充权重（使用配置阈值）
+        if decline_data['total_decline'] > config['strong_total_decline']:
             decline_multiplier *= 1.2
             print(f"📊 深度下跌{decline_data['total_decline']:.2f}%，补充权重: 1.2x")
+        elif decline_data['total_decline'] > config['min_total_decline']:
+            decline_multiplier *= 1.1
+            print(f"📊 中度下跌{decline_data['total_decline']:.2f}%，补充权重: 1.1x")
         
         # 低位+下跌组合权重
         position_weight = 1.0
