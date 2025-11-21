@@ -203,21 +203,36 @@ def calculate_price_position(price_data):
         return 50
 
 def calculate_decline_pattern(price_data):
-    """计算长期连续下跌模式指标"""
+    """增强下跌确认和反转信号检测"""
     try:
         kline_data = price_data.get('kline_data', [])
-        if len(kline_data) < 12:  # 至少12根K线（3小时数据）
-            return {'consecutive_declines': 0, 'total_decline': 0.0, 'decline_duration': 0}
+        if len(kline_data) < 20:  # 至少20根K线（5小时数据）
+            return {
+                'consecutive_declines': 0, 
+                'total_decline': 0.0, 
+                'decline_duration': 0,
+                'is_reversal': False,
+                'confirmation_strength': 0
+            }
         
-        # 获取最近12根K线（3小时 = 12×15分钟）
-        recent_klines = kline_data[-12:]
+        # 获取最近20根K线（5小时数据）
+        recent_klines = kline_data[-20:]
         
-        consecutive_declines = 0
-        total_decline = 0.0
+        # 🆕 计算下跌确认指标
+        decline_data = {
+            'consecutive_declines': 0,
+            'total_decline': 0.0,
+            'decline_duration': 0,
+            'is_reversal': False,
+            'confirmation_strength': 0,
+            'volume_confirmation': False
+        }
+        
+        # 1. 计算最长连续下跌序列
         max_consecutive = 0
         current_streak = 0
+        total_decline = 0.0
         
-        # 计算最长连续下跌序列
         for kline in reversed(recent_klines):
             if kline['close'] < kline['open']:  # 阴线
                 current_streak += 1
@@ -225,24 +240,57 @@ def calculate_decline_pattern(price_data):
                 total_decline += decline
                 max_consecutive = max(max_consecutive, current_streak)
             else:
-                current_streak = 0
-                break  # 遇到阳线停止当前序列
+                break
         
-        # 使用最长连续下跌序列
-        consecutive_declines = max_consecutive
+        decline_data['consecutive_declines'] = max_consecutive
+        decline_data['total_decline'] = total_decline
+        decline_data['decline_duration'] = max_consecutive * 15
         
-        # 计算下跌持续时间（分钟）
-        decline_duration = consecutive_declines * 15  # 每根K线15分钟
+        # 2. 🆕 反转信号确认
+        if len(recent_klines) >= 4:
+            last_4_klines = recent_klines[-4:]
+            
+            # 检查是否出现反转信号
+            # 条件：最后3根下跌，第4根开始反弹
+            if (len(last_4_klines) == 4 and 
+                last_4_klines[0]['close'] < last_4_klines[0]['open'] and  # 第1根下跌
+                last_4_klines[1]['close'] < last_4_klines[1]['open'] and  # 第2根下跌
+                last_4_klines[2]['close'] < last_4_klines[2]['open'] and  # 第3根下跌
+                last_4_klines[3]['close'] > last_4_klines[3]['open']):    # 第4根反弹
+                decline_data['is_reversal'] = True
+                decline_data['confirmation_strength'] = 3
+            
+            # 检查是否有长下影线（锤子线信号）
+            for kline in last_4_klines[-2:]:  # 最后2根
+                body_size = abs(kline['close'] - kline['open'])
+                lower_shadow = min(kline['open'], kline['close']) - kline['low']
+                upper_shadow = kline['high'] - max(kline['open'], kline['close'])
+                
+                if lower_shadow > body_size * 2 and upper_shadow < body_size * 0.5:
+                    decline_data['is_reversal'] = True
+                    decline_data['confirmation_strength'] = 2
         
-        return {
-            'consecutive_declines': consecutive_declines,
-            'total_decline': total_decline,
-            'decline_duration': decline_duration
-        }
+        # 3. 🆕 成交量确认
+        if len(recent_klines) >= 5:
+            volumes = [k.get('volume', 0) for k in recent_klines[-5:]]
+            if volumes and len(volumes) >= 3:
+                avg_volume = sum(volumes[:-1]) / len(volumes[:-1])
+                last_volume = volumes[-1]
+                # 反转时成交量放大确认
+                if last_volume > avg_volume * 1.5:
+                    decline_data['volume_confirmation'] = True
+        
+        return decline_data
         
     except Exception as e:
-        print(f"下跌模式计算错误: {e}")
-        return {'consecutive_declines': 0, 'total_decline': 0.0, 'decline_duration': 0}
+        print(f"下跌确认计算错误: {e}")
+        return {
+            'consecutive_declines': 0, 
+            'total_decline': 0.0, 
+            'decline_duration': 0,
+            'is_reversal': False,
+            'confirmation_strength': 0
+        }
 
 def calculate_intelligent_position(signal_data, price_data, current_position):
     """计算智能仓位大小 - 修复版"""
@@ -287,24 +335,37 @@ def calculate_intelligent_position(signal_data, price_data, current_position):
         decline_data = calculate_decline_pattern(price_data)
         decline_multiplier = 1.0
         
-        # 🆕 长期下跌抄底权重（3小时周期）
-        if decline_data['consecutive_declines'] >= 6:  # 连续6根阴线（1.5小时）
-            decline_multiplier *= 2.0
-            print(f"🔻 长期下跌{decline_data['decline_duration']}分钟，强力抄底: 2.0x")
-        elif decline_data['consecutive_declines'] >= 4:  # 连续4根阴线（1小时）
-            decline_multiplier *= 1.6
-            print(f"📉 中期下跌{decline_data['decline_duration']}分钟，抄底权重: 1.6x")
-        elif decline_data['consecutive_declines'] >= 2:  # 连续2根阴线（30分钟）
-            decline_multiplier *= 1.2
-            print(f"📊 短期下跌{decline_data['decline_duration']}分钟，抄底权重: 1.2x")
+        # 🆕 增强抄底确认机制
+        decline_multiplier = 1.0
         
-        # 🆕 长期下跌幅度权重
-        if decline_data['total_decline'] > 3.0:  # 累计下跌超过3%（3小时）
-            decline_multiplier *= 1.4
-            print(f"📊 长期累计下跌{decline_data['total_decline']:.2f}%，抄底权重: 1.4x")
-        elif decline_data['total_decline'] > 1.5:  # 累计下跌超过1.5%
+        # 1. 反转确认优先
+        if decline_data['is_reversal'] and decline_data['confirmation_strength'] >= 3:
+            # 强反转信号：下跌后出现明确反弹
+            decline_multiplier *= 2.5
+            print(f"🔄 强反转确认，抄底权重: 2.5x")
+        elif decline_data['is_reversal'] and decline_data['confirmation_strength'] >= 2:
+            # 中等反转信号：锤子线等
+            decline_multiplier *= 1.8
+            print(f"🔄 中等反转确认，抄底权重: 1.8x")
+        
+        # 2. 长期下跌+成交量确认
+        elif decline_data['consecutive_declines'] >= 6:  # 1.5小时下跌
+            if decline_data['volume_confirmation']:
+                decline_multiplier *= 2.0
+                print(f"🔻 长期下跌+放量确认，强力抄底: 2.0x")
+            else:
+                decline_multiplier *= 1.6
+                print(f"📉 长期下跌{decline_data['decline_duration']}分钟，谨慎抄底: 1.6x")
+        
+        # 3. 中期下跌确认
+        elif decline_data['consecutive_declines'] >= 4:  # 1小时下跌
             decline_multiplier *= 1.3
-            print(f"📊 中期累计下跌{decline_data['total_decline']:.2f}%，抄底权重: 1.3x")
+            print(f"📊 中期下跌{decline_data['decline_duration']}分钟，抄底权重: 1.3x")
+        
+        # 4. 下跌幅度补充权重
+        if decline_data['total_decline'] > 4.0:  # 累计下跌超过4%（5小时）
+            decline_multiplier *= 1.2
+            print(f"📊 深度下跌{decline_data['total_decline']:.2f}%，补充权重: 1.2x")
         
         # 低位+下跌组合权重
         position_weight = 1.0
@@ -997,13 +1058,18 @@ MACD: {price_data['trend_analysis'].get('macd', 'N/A')}
 超卖信号: {'✅' if price_data['technical_data'].get('rsi', 50) < 35 else '❌'}
 低波动机会: {'✅' if market_state['atr_pct'] < 1.5 else '❌'}
 
-【🎯 长期抄底决策逻辑】
-当满足以下任一条件时优先考虑BUY：
-1. 长期下跌（1.5小时+）+ 低位 → HIGH信心BUY
-2. 中期下跌（1小时+）+ RSI < 35 → HIGH信心BUY
-3. 短期下跌（30分钟+）+ 价格触及布林带下轨 → MEDIUM信心BUY
-4. 累计下跌>3% + 超卖信号 → HIGH信心BUY
-5. 下跌后出现首根阳线 → 反转确认BUY
+【🎯 精准抄底决策逻辑】
+抄底必须满足反转确认条件：
+1. 反转确认优先：出现锤子线/阳线反转信号 → HIGH信心BUY
+2. 长期下跌+放量反弹：下跌1.5小时+成交量放大 → HIGH信心BUY
+3. 下跌衰竭信号：连续下跌后出现长下影线 → MEDIUM信心BUY
+4. 价格企稳：下跌后价格不再创新低 → MEDIUM信心BUY
+
+⚠️ 禁止抄底条件：
+- 无反转信号确认
+- 下跌趋势未衰竭
+- 成交量未放大
+- 价格仍在创新低
 
 【⚠️ 风险控制】
 {tp_sl_hint}
