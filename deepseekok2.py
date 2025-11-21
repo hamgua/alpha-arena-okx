@@ -82,6 +82,14 @@ TRADE_CONFIG = {
         'strong_total_decline': 4.0, # 强累计跌幅：4.0%
         'volume_confirmation': True, # 成交量确认
         'require_reversal_signal': True  # 必须反转信号确认
+    },
+    
+    # 🆕 Web监控界面配置 - 小白用户友好
+    'web_interface': {
+        'enabled': False,           # 是否启用Web监控界面（True=开启，False=关闭）
+        'port': 8501,              # Web界面端口（默认8501）
+        'auto_refresh': True,      # 是否自动刷新（True=每10秒刷新）
+        'theme': 'dark'            # 界面主题（dark/light）
     }
 }
 

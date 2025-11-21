@@ -4,9 +4,9 @@
 BTC自动交易机器人 - 统一启动程序
 适用于宝塔面板等单入口部署场景
 
-同时启动：
-1. 交易程序（deepseekok2.py）
-2. Web监控界面（streamlit）
+智能启动：
+1. 交易程序（deepseekok2.py）- 始终启动
+2. Web监控界面（streamlit）- 根据配置决定是否启动
 """
 
 import os
@@ -17,11 +17,24 @@ import subprocess
 from multiprocessing import Process
 from pathlib import Path
 
-# 设置Streamlit配置目录为当前目录（避免权限问题）
-os.environ['STREAMLIT_CONFIG_DIR'] = os.path.join(os.getcwd(), '.streamlit_config')
-os.environ['STREAMLIT_SERVER_HEADLESS'] = 'true'
-os.environ['STREAMLIT_SERVER_FILE_WATCHER_TYPE'] = 'none'
-os.environ['STREAMLIT_BROWSER_GATHER_USAGE_STATS'] = 'false'
+# 读取交易配置，决定是否启动Web界面
+try:
+    # 临时导入获取配置
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import deepseekok2
+    WEB_CONFIG = deepseekok2.TRADE_CONFIG.get('web_interface', {})
+    WEB_ENABLED = WEB_CONFIG.get('enabled', False)
+    WEB_PORT = WEB_CONFIG.get('port', 8501)
+except:
+    WEB_ENABLED = False
+    WEB_PORT = 8501
+
+# 只有在启用Web界面时才设置Streamlit环境变量
+if WEB_ENABLED:
+    os.environ['STREAMLIT_CONFIG_DIR'] = os.path.join(os.getcwd(), '.streamlit_config')
+    os.environ['STREAMLIT_SERVER_HEADLESS'] = 'true'
+    os.environ['STREAMLIT_SERVER_FILE_WATCHER_TYPE'] = 'none'
+    os.environ['STREAMLIT_BROWSER_GATHER_USAGE_STATS'] = 'false'
 
 # 全局进程列表
 processes = []
@@ -197,37 +210,54 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
-    log("🚀 启动所有服务...")
+    # 根据配置决定是否启动Web界面
+    if WEB_ENABLED:
+        log("🚀 启动交易程序 + Web监控界面...")
+    else:
+        log("🚀 启动交易程序（Web界面已禁用）...")
     print()
     
-    # 创建交易程序进程
+    # 创建交易程序进程（始终启动）
     trading_process = Process(
         target=run_trading_bot,
         name="TradingBot"
     )
     processes.append(trading_process)
     
-    # 创建Web界面进程
-    web_process = Process(
-        target=run_web_interface,
-        name="WebInterface"
-    )
-    processes.append(web_process)
+    # 根据配置决定是否创建Web界面进程
+    if WEB_ENABLED:
+        web_process = Process(
+            target=run_web_interface,
+            name="WebInterface"
+        )
+        processes.append(web_process)
     
-    # 启动所有进程
+    # 启动进程
     trading_process.start()
-    time.sleep(2)  # 等待交易程序初始化
-    web_process.start()
+    if WEB_ENABLED:
+        time.sleep(2)  # 等待交易程序初始化
+        web_process.start()
     
-    log("✅ 所有服务已启动")
-    print()
-    print("=" * 60)
-    print("📊 服务信息")
-    print("=" * 60)
-    print("🤖 交易程序: 运行中")
-    print("🌐 Web监控界面: http://0.0.0.0:8501")
-    print("   （宝塔面板会自动映射到您的域名）")
-    print("=" * 60)
+    if WEB_ENABLED:
+        log("✅ 交易程序 + Web界面已启动")
+        print()
+        print("=" * 60)
+        print("📊 服务信息")
+        print("=" * 60)
+        print("🤖 交易程序: 运行中")
+        print(f"🌐 Web监控界面: http://0.0.0.0:{WEB_PORT}")
+        print("   （宝塔面板会自动映射到您的域名）")
+        print("=" * 60)
+    else:
+        log("✅ 交易程序已启动（Web界面已禁用）")
+        print()
+        print("=" * 60)
+        print("📊 服务信息")
+        print("=" * 60)
+        print("🤖 交易程序: 运行中")
+        print("🌐 Web监控界面: 已禁用")
+        print("   （如需启用，请修改配置文件）")
+        print("=" * 60)
     print()
     log("💡 按 Ctrl+C 停止所有服务")
     print()
@@ -249,11 +279,13 @@ def main():
                                 target=run_trading_bot,
                                 name="TradingBot"
                             )
-                        else:
+                        elif p.name == "WebInterface" and WEB_ENABLED:
                             new_process = Process(
                                 target=run_web_interface,
                                 name="WebInterface"
                             )
+                        else:
+                            continue  # 跳过不重启的进程
                         
                         # 替换进程
                         processes.remove(p)
