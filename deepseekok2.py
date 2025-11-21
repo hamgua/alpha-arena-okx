@@ -1,6 +1,6 @@
 import os
 import time
-import schedule
+
 from openai import OpenAI
 import ccxt
 import pandas as pd
@@ -65,23 +65,40 @@ TRADE_CONFIG = {
         'micro_movement_multiplier': 3.0  # 小波动3倍放大
     },
     
-    # 🆕 连续阴线抄底配置 - 小白用户友好
-    # 📖 使用说明：
-    # - data_window: 分析多少根K线（20=5小时，15=3.75小时）
-    # - min_decline_duration: 最少连续下跌几根才考虑抄底（4根=1小时）
-    # - strong_decline_duration: 强力抄底需要连续下跌几根（6根=1.5小时）
-    # - min_total_decline: 最少累计跌幅多少百分比才考虑抄底
-    # - strong_total_decline: 强力抄底需要累计跌幅多少百分比
-    # - volume_confirmation: 是否需要成交量放大确认反转
-    # - require_reversal_signal: 是否必须出现阳线/锤子线等反转信号
+    # 🆕 震荡市专用策略配置 - 解决无规律行情盈利问题
+    # 📖 震荡市优化说明：
+    # - 减少交易频率，提高单次盈利质量
+    # - 增加震荡识别，避免追涨杀跌
+    # - 动态仓位调整，降低震荡市风险
     'decline_detection': {
-        'data_window': 20,           # 分析窗口：20根K线（5小时数据）
-        'min_decline_duration': 4,   # 最少连续阴线：4根（1小时）
-        'strong_decline_duration': 6, # 强连续阴线：6根（1.5小时）
-        'min_total_decline': 1.5,    # 最少累计跌幅：1.5%
-        'strong_total_decline': 4.0, # 强累计跌幅：4.0%
-        'volume_confirmation': True, # 成交量确认
-        'require_reversal_signal': True  # 必须反转信号确认
+        'data_window': 30,           # 📈 更长分析窗口：30根K线（7.5小时）识别震荡
+        'min_decline_duration': 8,   # 🎯 严格抄底：8根阴线（2小时）避免假信号
+        'strong_decline_duration': 12, # 💪 强力抄底：12根阴线（3小时）确保底部
+        'min_total_decline': 2.5,    # 📉 更高跌幅要求：2.5%才考虑抄底
+        'strong_total_decline': 6.0, # 🚀 深度抄底：6%跌幅强力抄底
+        'volume_confirmation': True, # ✅ 成交量确认防止假突破
+        'require_reversal_signal': True  # 🔍 必须反转信号避免接飞刀
+    },
+    
+    # 🆕 震荡市专用风控配置
+    'oscillation_strategy': {
+        'enabled': True,            # 启用震荡市策略
+        'max_daily_trades': 2,      # 每日最多2次交易避免频繁操作
+        'min_profit_threshold': 0.8, # 最小盈利目标0.8%即止盈
+        'max_loss_threshold': 0.5,   # 最大亏损0.5%即止损
+        'position_size_reduction': 0.6, # 震荡市仓位降低至60%
+        'hold_time_limit': 120,     # 最长持仓2小时避免过夜风险
+        'volatility_filter': 1.5    # 波动率过滤，低于1.5%不参与
+    },
+    
+    # 🆕 区间交易策略配置
+    'range_trading': {
+        'enabled': True,            # 启用区间交易
+        'range_detection_periods': 36, # 36根K线（9小时）识别区间
+        'support_resistance_levels': 3,  # 确认3次高低点形成区间
+        'entry_buffer': 0.2,        # 区间边界缓冲0.2%
+        'range_break_stop': 0.3,    # 区间突破止损0.3%
+        'midpoint_reversal': True   # 区间中点反转交易
     },
     
     # 🆕 Web监控界面配置 - 小白用户友好
@@ -229,6 +246,131 @@ def calculate_price_position(price_data):
         print(f"价格位置计算错误: {e}")
         return 50
 
+def identify_market_condition(price_data):
+    """识别市场状态：震荡市、趋势市、单边市"""
+    try:
+        kline_data = price_data.get('kline_data', [])
+        if len(kline_data) < 30:
+            return 'normal'
+        
+        # 获取最近30根K线数据
+        recent_klines = kline_data[-30:]
+        
+        # 计算价格波动范围
+        highs = [k['high'] for k in recent_klines]
+        lows = [k['low'] for k in recent_klines]
+        closes = [k['close'] for k in recent_klines]
+        
+        highest_high = max(highs)
+        lowest_low = min(lows)
+        price_range = ((highest_high - lowest_low) / lowest_low) * 100
+        
+        # 计算平均真实波幅ATR
+        atr_values = []
+        for i in range(1, len(recent_klines)):
+            prev_close = recent_klines[i-1]['close']
+            curr_high = recent_klines[i]['high']
+            curr_low = recent_klines[i]['low']
+            
+            tr1 = curr_high - curr_low
+            tr2 = abs(curr_high - prev_close)
+            tr3 = abs(curr_low - prev_close)
+            atr_values.append(max(tr1, tr2, tr3))
+        
+        avg_atr = sum(atr_values) / len(atr_values) if atr_values else 0
+        avg_atr_pct = (avg_atr / closes[-1]) * 100 if closes else 0
+        
+        # 计算趋势强度
+        sma_10 = sum(closes[-10:]) / 10 if len(closes) >= 10 else closes[-1]
+        sma_20 = sum(closes[-20:]) / 20 if len(closes) >= 20 else closes[-1]
+        trend_strength = abs((sma_10 - sma_20) / sma_20) * 100
+        
+        # 震荡市识别条件
+        if price_range < 4.0 and avg_atr_pct < 1.5 and trend_strength < 0.5:
+            return 'oscillation'  # 震荡市
+        elif trend_strength > 2.0:
+            return 'trending'     # 趋势市
+        else:
+            return 'normal'       # 正常市
+            
+    except Exception as e:
+        print(f"市场状态识别错误: {e}")
+        return 'normal'
+
+def detect_trading_range(price_data):
+    """检测交易区间（支撑阻力位）"""
+    try:
+        config = TRADE_CONFIG['range_trading']
+        kline_data = price_data.get('kline_data', [])
+        periods = config['range_detection_periods']
+        
+        if len(kline_data) < periods:
+            return None
+        
+        # 获取指定周期的K线数据
+        recent_klines = kline_data[-periods:]
+        
+        # 寻找支撑和阻力位
+        highs = [k['high'] for k in recent_klines]
+        lows = [k['low'] for k in recent_klines]
+        
+        # 使用更严格的方法识别关键价位
+        resistance_levels = []
+        support_levels = []
+        
+        # 识别阻力位（多次测试的高点）
+        for i in range(len(highs)):
+            current_high = highs[i]
+            # 检查这个高点是否被多次测试
+            test_count = sum(1 for h in highs[max(0, i-5):i+5] if abs(h - current_high) < current_high * 0.002)
+            if test_count >= config['support_resistance_levels']:
+                resistance_levels.append(current_high)
+        
+        # 识别支撑位（多次测试的低点）
+        for i in range(len(lows)):
+            current_low = lows[i]
+            # 检查这个低点是否被多次测试
+            test_count = sum(1 for l in lows[max(0, i-5):i+5] if abs(l - current_low) < current_low * 0.002)
+            if test_count >= config['support_resistance_levels']:
+                support_levels.append(current_low)
+        
+        if not resistance_levels or not support_levels:
+            return None
+        
+        # 取最可靠的支撑阻力位
+        resistance = min(resistance_levels)  # 最严格的阻力位
+        support = max(support_levels)        # 最严格的支撑位
+        
+        # 验证区间有效性
+        if resistance <= support:
+            return None
+            
+        range_height = ((resistance - support) / support) * 100
+        
+        # 检查区间是否在合理范围内
+        if range_height < 0.5 or range_height > 4.0:  # 区间太窄或太宽都不适合
+            return None
+        
+        current_price = price_data['price']
+        
+        # 判断当前价格在区间中的位置
+        range_position = ((current_price - support) / (resistance - support)) * 100
+        
+        return {
+            'support': support,
+            'resistance': resistance,
+            'midpoint': (support + resistance) / 2,
+            'range_height': range_height,
+            'position_in_range': range_position,
+            'is_near_support': range_position < 25,      # 靠近支撑位
+            'is_near_resistance': range_position > 75,   # 靠近阻力位
+            'is_near_midpoint': 40 <= range_position <= 60  # 靠近中点
+        }
+        
+    except Exception as e:
+        print(f"区间检测错误: {e}")
+        return None
+
 def calculate_decline_pattern(price_data):
     """增强下跌确认和反转信号检测 - 使用配置文件参数"""
     try:
@@ -367,12 +509,28 @@ def calculate_intelligent_position(signal_data, price_data, current_position):
         decline_data = calculate_decline_pattern(price_data)
         decline_multiplier = 1.0
         
-        # 🆕 使用配置文件参数的增强抄底确认机制
-        config = TRADE_CONFIG['decline_detection']
-        decline_multiplier = 1.0
+        # 🆕 震荡市智能策略
+        market_condition = identify_market_condition(price_data)
+        osc_config = TRADE_CONFIG['oscillation_strategy']
+        
+        # 根据市场状态调整策略
+        if market_condition == 'oscillation' and osc_config['enabled']:
+            print(f"🌊 检测到震荡市，启用震荡策略")
+            
+            # 震荡市仓位降低
+            position_multiplier = osc_config['position_size_reduction']
+            print(f"📉 震荡市仓位降低至{position_multiplier*100:.0f}%")
+            
+            # 严格入场条件
+            if decline_data['consecutive_declines'] < 6:  # 震荡市要求更高
+                print("🚫 震荡市：下跌不够深，跳过抄底")
+                return 0
+                
+            # 🆕 使用配置文件参数的增强抄底确认机制
+        decline_config = TRADE_CONFIG['decline_detection']
         
         # 1. 反转确认优先（必须满足配置要求）
-        if config['require_reversal_signal'] and decline_data['is_reversal']:
+        if decline_config['require_reversal_signal'] and decline_data['is_reversal']:
             if decline_data['confirmation_strength'] >= 3:
                 decline_multiplier *= 2.5
                 print(f"🔄 强反转确认，抄底权重: 2.5x")
@@ -381,8 +539,8 @@ def calculate_intelligent_position(signal_data, price_data, current_position):
                 print(f"🔄 中等反转确认，抄底权重: 1.8x")
         
         # 2. 长期下跌确认（使用配置阈值）
-        elif decline_data['consecutive_declines'] >= config['strong_decline_duration']:
-            if config['volume_confirmation'] and decline_data['volume_confirmation']:
+        elif decline_data['consecutive_declines'] >= decline_config['strong_decline_duration']:
+            if decline_config['volume_confirmation'] and decline_data['volume_confirmation']:
                 decline_multiplier *= 2.0
                 print(f"🔻 长期下跌{decline_data['decline_duration']}分钟+放量确认，强力抄底: 2.0x")
             else:
@@ -390,37 +548,41 @@ def calculate_intelligent_position(signal_data, price_data, current_position):
                 print(f"📉 长期下跌{decline_data['decline_duration']}分钟，谨慎抄底: 1.6x")
         
         # 3. 中期下跌确认
-        elif decline_data['consecutive_declines'] >= config['min_decline_duration']:
+        elif decline_data['consecutive_declines'] >= decline_config['min_decline_duration']:
             decline_multiplier *= 1.3
             print(f"📊 中期下跌{decline_data['decline_duration']}分钟，抄底权重: 1.3x")
         
         # 4. 下跌幅度补充权重（使用配置阈值）
-        if decline_data['total_decline'] > config['strong_total_decline']:
+        if decline_data['total_decline'] > decline_config['strong_total_decline']:
             decline_multiplier *= 1.2
             print(f"📊 深度下跌{decline_data['total_decline']:.2f}%，补充权重: 1.2x")
-        elif decline_data['total_decline'] > config['min_total_decline']:
+        elif decline_data['total_decline'] > decline_config['min_total_decline']:
             decline_multiplier *= 1.1
             print(f"📊 中度下跌{decline_data['total_decline']:.2f}%，补充权重: 1.1x")
         
-        # 低位+下跌组合权重
+        # 5. 🆕 震荡市仓位调整
         position_weight = 1.0
-        if price_position < 30 and decline_data['consecutive_declines'] >= 2:
-            position_weight *= 2.2  # 低位+连续下跌，强力抄底
-            print(f"🎯 低位({price_position:.1f}%) + 连续下跌，强力抄底: 2.2x")
-        elif price_position < 40 and decline_data['consecutive_declines'] >= 2:
-            position_weight *= 1.8  # 相对低位+连续下跌
-            print(f"🎯 相对低位({price_position:.1f}%) + 连续下跌: 1.8x")
-        elif price_position < 30:  # 仅价格低位
-            position_weight *= 1.5
-            print(f"🎯 价格低位({price_position:.1f}%)，加大仓位权重: 1.5x")
-        elif price_position > 70:  # 价格高位
-            position_weight *= 0.7
-            print(f"⚠️ 价格高位({price_position:.1f}%)，减小仓位权重: 0.7x")
+        if market_condition == 'oscillation' and osc_config['enabled']:
+            decline_multiplier *= osc_config['position_size_reduction']
+            
+            # 低位+下跌组合权重
+            if price_position < 30 and decline_data['consecutive_declines'] >= 2:
+                position_weight *= 2.2  # 低位+连续下跌，强力抄底
+                print(f"🎯 低位({price_position:.1f}%) + 连续下跌，强力抄底: 2.2x")
+            elif price_position < 40 and decline_data['consecutive_declines'] >= 2:
+                position_weight *= 1.8  # 相对低位+连续下跌
+                print(f"🎯 相对低位({price_position:.1f}%) + 连续下跌: 1.8x")
+            elif price_position < 30:  # 仅价格低位
+                position_weight *= 1.5
+                print(f"🎯 价格低位({price_position:.1f}%)，加大仓位权重: 1.5x")
+            elif price_position > 70:  # 价格高位
+                position_weight *= 0.7
+                print(f"⚠️ 价格高位({price_position:.1f}%)，减小仓位权重: 0.7x")
 
         # 超敏感价格变化检测
         price_change = abs(price_data.get('price_change', 0))
         if price_change < 0.02:  # 极低波动
-            micro_multiplier = config.get('micro_movement_multiplier', 3.0)
+            micro_multiplier = decline_config.get('micro_movement_multiplier', 3.0)
         elif price_change < 0.05:
             micro_multiplier = 2.0
         elif price_change < 0.1:
@@ -436,15 +598,11 @@ def calculate_intelligent_position(signal_data, price_data, current_position):
         elif rsi > 70:  # 超买区域 - 减小买入权重
             rsi_multiplier = 0.6
             print(f"🔴 RSI超买({rsi:.1f})，减小仓位权重: 0.6x")
-        elif rsi > 80 or rsi < 20:
-            rsi_multiplier = 1.2
-        elif rsi > 75 or rsi < 25:
-            rsi_multiplier = 0.9
 
         # 🎯 计算最终仓位（加入连续下跌抄底权重）
         suggested_usdt = base_usdt * confidence_multiplier * trend_multiplier * rsi_multiplier * micro_multiplier * position_weight * decline_multiplier
 
-        # 风险管理：不超过总资金的指定比例 - 删除重复定义
+        # 风险管理：不超过总资金的指定比例
         max_usdt = usdt_balance * config['max_position_ratio']
         final_usdt = min(suggested_usdt, max_usdt)
 
@@ -468,7 +626,7 @@ def calculate_intelligent_position(signal_data, price_data, current_position):
         # 精度处理：OKX BTC合约最小交易单位为0.01张
         contract_size = round(contract_size, 2)  # 保留2位小数
 
-        # 确保最小交易量 - 提高最小交易量
+        # 确保最小交易量
         min_contracts = max(TRADE_CONFIG.get('min_amount', 0.01), 0.05)  # 最小0.05张
         if contract_size < min_contracts:
             contract_size = min_contracts
@@ -1024,7 +1182,7 @@ def analyze_with_deepseek(price_data):
     """使用DeepSeek分析市场并生成交易信号（优化版）"""
 
     # 生成技术分析文本
-    technical_analysis = generate_technical_analysis_text(price_data)
+    # technical_analysis = generate_technical_analysis_text(price_data)
 
     # 构建K线数据文本
     kline_text = f"【最近5根{TRADE_CONFIG['timeframe']}K线数据】\n"
@@ -1034,10 +1192,10 @@ def analyze_with_deepseek(price_data):
         kline_text += f"K线{i + 1}: {trend} 开盘:{kline['open']:.2f} 收盘:{kline['close']:.2f} 涨跌:{change:+.2f}%\n"
 
     # 添加上次交易信号
-    signal_text = ""
+    last_signal_info = ""
     if signal_history:
         last_signal = signal_history[-1]
-        signal_text = f"\n【上次信号】{last_signal.get('signal', 'N/A')} (信心: {last_signal.get('confidence', 'N/A')})"
+        last_signal_info = f"\n【上次信号】{last_signal.get('signal', 'N/A')} (信心: {last_signal.get('confidence', 'N/A')})"
 
     # 获取情绪数据
     sentiment_data = get_sentiment_indicators()
@@ -1050,7 +1208,6 @@ def analyze_with_deepseek(price_data):
     # 添加当前持仓信息
     current_pos = get_current_position()
     position_text = "无持仓" if not current_pos else f"{current_pos['side']}仓, 数量: {current_pos['size']}, 盈亏: {current_pos['unrealized_pnl']:.2f}USDT"
-    pnl_text = f", 持仓盈亏: {current_pos['unrealized_pnl']:.2f} USDT" if current_pos else ""
 
     # 识别市场状态
     tech_data = price_data.get('technical_data', {})
@@ -1063,9 +1220,6 @@ def analyze_with_deepseek(price_data):
     # 🎯 优化的低价买入权重判断
     # 计算相对价格位置（0-100，越低越接近底部）
     price_position = calculate_price_position(price_data)
-    
-    # 计算波动率折扣因子（低波动时更敏感）
-    volatility_discount = max(0.5, 2.0 - market_state['atr_pct'])
     
     # 计算买入权重增强
     buy_weight_multiplier = 1.0
@@ -1096,18 +1250,26 @@ MACD: {price_data['trend_analysis'].get('macd', 'N/A')}
 超卖信号: {'✅' if price_data['technical_data'].get('rsi', 50) < 35 else '❌'}
 低波动机会: {'✅' if market_state['atr_pct'] < 1.5 else '❌'}
 
-【🎯 精准抄底决策逻辑】
-抄底必须满足反转确认条件：
-1. 反转确认优先：出现锤子线/阳线反转信号 → HIGH信心BUY
-2. 长期下跌+放量反弹：下跌1.5小时+成交量放大 → HIGH信心BUY
-3. 下跌衰竭信号：连续下跌后出现长下影线 → MEDIUM信心BUY
-4. 价格企稳：下跌后价格不再创新低 → MEDIUM信心BUY
+【🎯 震荡市专用策略】
+震荡市识别条件：价格波动<4%，ATR<1.5%，趋势强度<0.5%
 
-⚠️ 禁止抄底条件：
-- 无反转信号确认
-- 下跌趋势未衰竭
-- 成交量未放大
-- 价格仍在创新低
+🔄 区间交易策略：
+1. 靠近支撑位（<25%）+ 反转信号 → HIGH信心BUY
+2. 靠近阻力位（>75%）+ 反转信号 → HIGH信心SELL
+3. 区间中点（40-60%）+ 明确信号 → MEDIUM信心交易
+4. 区间突破立即止损（0.3%）
+
+⚠️ 震荡市风控：
+- 每日最多2次交易
+- 盈利0.8%立即止盈
+- 亏损0.5%立即止损
+- 仓位降低至60%
+- 最长持仓2小时
+
+🚫 禁止交易：
+- 波动率<1.5%（无行情）
+- 无明确区间形成
+- 区间太窄（<0.5%）或太宽（>4%）
 
 【⚠️ 风险控制】
 {tp_sl_hint}

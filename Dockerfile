@@ -1,6 +1,14 @@
 # 使用Python 3.11官方镜像作为基础镜像
 FROM python:3.11-slim
 
+# 设置时区环境变量
+ENV TZ=Asia/Shanghai
+
+RUN echo "deb https://mirrors.ustc.edu.cn/debian/ trixie main" > /etc/apt/sources.list && \
+    echo "deb https://mirrors.ustc.edu.cn/debian/ trixie-updates main" >> /etc/apt/sources.list && \
+    echo "deb https://mirrors.ustc.edu.cn/debian-security trixie-security main" >> /etc/apt/sources.list && \
+    rm -rf /etc/apt/sources.list.d/* || true
+
 # 设置工作目录
 WORKDIR /app
 
@@ -23,8 +31,10 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 
 # 安装Python依赖
-RUN pip install --upgrade pip && \
-    pip install -r requirements.txt
+RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple/ && \
+    pip config set global.trusted-host pypi.tuna.tsinghua.edu.cn && \
+    pip install --upgrade pip && \
+    pip install --no-cache-dir --default-timeout=1000 -r requirements.txt
 
 # 复制项目文件
 COPY run.py .
