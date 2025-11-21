@@ -1108,6 +1108,10 @@ def validate_ai_signal(ai_signal, price_data, tech_data):
     current_price = price_data['price']
     kline_data = price_data.get('kline_data', [])
 
+    print(f"\n🔍 【AI信号验证开始】")
+    print(f"   AI原始信号: {signal} (信心: {ai_signal.get('confidence', 'N/A')})")
+    print(f"   当前价格: ${current_price:.2f}")
+
     # 🆕 新增：K线状态验证
     def get_current_kline_state():
         """获取当前K线状态"""
@@ -1129,6 +1133,7 @@ def validate_ai_signal(ai_signal, price_data, tech_data):
     def check_trade_cooldown():
         """检查是否有足够的交易冷却期"""
         if len(signal_history) < 2:
+            print(f"   ✅ 首次交易或历史不足，允许交易")
             return True
         
         # 检查最近两次交易的时间间隔
@@ -1139,79 +1144,113 @@ def validate_ai_signal(ai_signal, price_data, tech_data):
                 current_time = datetime.now()
                 time_diff = (current_time - last_time).total_seconds() / 60  # 分钟
                 
+                print(f"   📊 上次交易时间: {last_trade['timestamp']}")
+                print(f"   ⏰ 距离上次交易: {time_diff:.1f}分钟")
+                
                 # 最少冷却5分钟
                 if time_diff < 5:
-                    print(f"🚫 交易冷却期不足：{time_diff:.1f}分钟 < 5分钟")
+                    print(f"   🚫 交易冷却期不足：{time_diff:.1f}分钟 < 5分钟，跳过交易")
                     return False
-            except:
-                pass
+                else:
+                    print(f"   ✅ 冷却期充足：{time_diff:.1f}分钟 ≥ 5分钟")
+            except Exception as e:
+                print(f"   ⚠️ 时间解析异常: {e}")
         return True
 
     # 🆕 新增：K线验证逻辑
     kline_state = get_current_kline_state()
+    print(f"   📈 K线状态: {'阴线' if kline_state['is_red'] else '阳线' if kline_state['is_green'] else '十字星'}")
+    print(f"   📊 K线涨跌: {kline_state['change']:+.2f}%")
     
     # 规则0: 交易冷却期检查
     if not check_trade_cooldown():
         ai_signal['signal'] = 'HOLD'
         ai_signal['reason'] = "交易冷却期不足，避免频繁交易"
+        print(f"   ❌ 验证结果: 跳过交易 (冷却期不足)")
         return ai_signal
 
     # 规则1: K线状态验证 - 防止在阳线高位买入
     if signal == 'BUY':
+        print(f"   🔍 检查BUY信号合理性...")
         if kline_state['is_green'] and kline_state['change'] > 0.5:
-            print(f"⚠️ 当前阳线上涨{kline_state['change']:.2f}%，不适合追高买入")
+            print(f"   ⚠️ 拒绝原因: 阳线上涨{kline_state['change']:.2f}%，追高风险高")
             ai_signal['confidence'] = 'LOW'
             ai_signal['reason'] += f" [阳线上涨{kline_state['change']:.2f}%]"
         
         # 新增：阴线买入验证
         elif kline_state['is_red'] or kline_state['change'] < -0.2:
-            print(f"✅ 阴线或下跌{kline_state['change']:.2f}%，符合买入条件")
+            print(f"   ✅ 通过验证: 阴线或下跌{kline_state['change']:.2f}%，适合抄底")
         else:
-            print(f"⚠️ 当前状态不适合买入：{kline_state['change']:.2f}%")
+            print(f"   ⚠️ 谨慎信号: 当前状态{kline_state['change']:+.2f}%，降低信心")
             ai_signal['confidence'] = 'LOW'
 
     if signal == 'SELL':
+        print(f"   🔍 检查SELL信号合理性...")
         if kline_state['is_red'] and kline_state['change'] < -0.5:
-            print(f"⚠️ 当前阴线下跌{kline_state['change']:.2f}%，不适合杀跌卖出")
+            print(f"   ⚠️ 拒绝原因: 阴线下跌{kline_state['change']:.2f}%，杀跌风险高")
             ai_signal['confidence'] = 'LOW'
             ai_signal['reason'] += f" [阴线下跌{kline_state['change']:.2f}%]"
+        else:
+            print(f"   ✅ 通过验证: 当前状态适合卖出")
 
     # 规则2: RSI极端值检查
     rsi = tech.get('rsi', 50)
+    print(f"   📊 RSI指标: {rsi:.1f}")
     if rsi > 80 and signal == 'BUY':
-        print("⚠️ RSI超买(>80)，降低BUY信号信心")
+        print(f"   ⚠️ RSI超买({rsi:.1f}>80)，BUY信号降级")
         ai_signal['confidence'] = 'LOW'
         ai_signal['reason'] += " [RSI超买警告]"
 
     if rsi < 20 and signal == 'SELL':
-        print("⚠️ RSI超卖(<20)，降低SELL信号信心")
+        print(f"   ⚠️ RSI超卖({rsi:.1f}<20)，SELL信号降级")
         ai_signal['confidence'] = 'LOW'
         ai_signal['reason'] += " [RSI超卖警告]"
+    elif 20 <= rsi <= 80:
+        print(f"   ✅ RSI正常区间({rsi:.1f})")
 
     # 规则4: 止盈止损合理性检查
     current_price = price_data['price']
     stop_loss = ai_signal.get('stop_loss', 0)
     take_profit = ai_signal.get('take_profit', 0)
 
+    print(f"   📊 止盈止损检查:")
+    print(f"      建议止损: ${stop_loss:.2f}")
+    print(f"      建议止盈: ${take_profit:.2f}")
+
     if signal == 'BUY':
         # 止损应该低于当前价
         if stop_loss >= current_price:
+            old_sl = stop_loss
             ai_signal['stop_loss'] = current_price * 0.98
-            print(f"⚠️ 修正BUY止损价: {ai_signal['stop_loss']:.2f}")
+            print(f"      ⚠️ 修正止损: ${old_sl:.2f} → ${ai_signal['stop_loss']:.2f}")
         # 止盈应该高于当前价
         if take_profit <= current_price:
+            old_tp = take_profit
             ai_signal['take_profit'] = current_price * 1.03
-            print(f"⚠️ 修正BUY止盈价: {ai_signal['take_profit']:.2f}")
+            print(f"      ⚠️ 修正止盈: ${old_tp:.2f} → ${ai_signal['take_profit']:.2f}")
 
     elif signal == 'SELL':
         # 止损应该高于当前价
         if stop_loss <= current_price:
+            old_sl = stop_loss
             ai_signal['stop_loss'] = current_price * 1.02
-            print(f"⚠️ 修正SELL止损价: {ai_signal['stop_loss']:.2f}")
+            print(f"      ⚠️ 修正止损: ${old_sl:.2f} → ${ai_signal['stop_loss']:.2f}")
         # 止盈应该低于当前价
         if take_profit >= current_price:
+            old_tp = take_profit
             ai_signal['take_profit'] = current_price * 0.97
-            print(f"⚠️ 修正SELL止盈价: {ai_signal['take_profit']:.2f}")
+            print(f"      ⚠️ 修正止盈: ${old_tp:.2f} → ${ai_signal['take_profit']:.2f}")
+
+    # 最终决策总结
+    final_signal = ai_signal.get('signal', 'HOLD')
+    final_confidence = ai_signal.get('confidence', 'N/A')
+    print(f"   🎯 最终决策: {final_signal} (信心: {final_confidence})")
+    if final_signal == 'HOLD':
+        reason = ai_signal.get('reason', '系统保护')
+        print(f"   📋 跳过原因: {reason}")
+    else:
+        print(f"   📋 执行理由: {ai_signal.get('reason', '通过验证')}")
+    print(f"   🔚 【验证完成】\n")
 
     return ai_signal
 
