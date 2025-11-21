@@ -841,19 +841,19 @@ def calculate_dynamic_tp_sl(signal, current_price, market_state, position=None):
 
     atr_pct = market_state.get('atr_pct', 2.0)  # 波动率
 
-    # 智能优化止盈止损 - 基于波动率和持仓状态
+    # 🆕 超敏感止损设置 - 及时止损保护利润
     atr_pct = market_state.get('atr_pct', 2.0)
     
-    # 基础设置（可根据持仓盈亏动态调整）
+    # 🆕 更敏感的止损设置（针对BTC小幅波动优化）
     if atr_pct > 2.5:  # 高波动
-        base_sl_pct = 0.008  # 紧止损
-        base_tp_pct = 0.08   # 提高止盈到8%，捕获大波动
+        base_sl_pct = 0.003  # 超紧止损 0.3%
+        base_tp_pct = 0.08   # 保持8%止盈
     elif atr_pct < 1.0:  # 极低波动
-        base_sl_pct = 0.003  # 超紧止损
-        base_tp_pct = 0.05   # 提高低波动止盈到5%
+        base_sl_pct = 0.0015  # 极紧止损 0.15%
+        base_tp_pct = 0.05   # 保持5%止盈
     else:  # 正常波动
-        base_sl_pct = 0.005  # 平衡止损
-        base_tp_pct = 0.065  # 平衡止盈6.5%
+        base_sl_pct = 0.002  # 紧止损 0.2%
+        base_tp_pct = 0.065  # 保持6.5%止盈
     
     # 持仓盈亏动态调整
     if position and position.get('unrealized_pnl', 0) > 0:
@@ -880,7 +880,7 @@ def calculate_dynamic_tp_sl(signal, current_price, market_state, position=None):
         stop_loss = current_price * 0.98
         take_profit = current_price * 1.02
 
-    # 如果有持仓，考虑移动止损
+    # 🆕 超早移动止损 - 保护微利润
     if position and position.get('unrealized_pnl', 0) > 0:
         entry_price = position.get('entry_price', current_price)
         position_size = position.get('size', 0)
@@ -888,13 +888,16 @@ def calculate_dynamic_tp_sl(signal, current_price, market_state, position=None):
         if entry_price > 0 and position_size > 0:
             profit_pct = position['unrealized_pnl'] / (entry_price * position_size * 0.01)
 
-            if profit_pct > 0.05:  # 盈利>5%
-                # 移动止损到保本+1%
+            # 🆕 微盈利即保护 - 避免利润回吐
+            if profit_pct > 0.008:  # 盈利>0.8%即移动止损
+                # 移动止损到保本+0.3%
                 if position['side'] == 'long':
-                    stop_loss = max(stop_loss, entry_price * 1.01)
-                else:
-                    stop_loss = min(stop_loss, entry_price * 0.99)
-                print(f"📈 盈利{profit_pct:.1%}，移动止损到保本+1%: {stop_loss:.2f}")
+                    stop_loss = max(stop_loss, entry_price * 1.003)
+                    print(f"🛡️ 微盈利{profit_pct:.2%}，超早移动止损: {stop_loss:.2f}")
+            elif profit_pct > 0.02:  # 盈利>2%进一步保护
+                if position['side'] == 'long':
+                    stop_loss = max(stop_loss, entry_price * 1.008)
+                    print(f"🛡️ 盈利{profit_pct:.1%}，加强保护: {stop_loss:.2f}")
 
     return {
         'stop_loss': round(stop_loss, 2),
